@@ -224,42 +224,49 @@ async function getCandles(sym){
   const cached = getCache('c:'+sym);
   if(cached) return cached;
 
-  // Try multiple CoinDCX candle URL formats
+  const now = Date.now();
+  const start = now - (90 * 24 * 60 * 60 * 1000); // 90 days ago
+
+  // CoinDCX requires startTime + endTime in milliseconds
   const urls = [
-    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_INR&interval=1d&limit=90`,
-    `https://public.coindcx.com/market_data/candles?pair=B-${sym}_INR&interval=1d&limit=90`,
-    `https://public.coindcx.com/market_data/candlesticks?pair=I-${sym}_INR&interval=1d&limit=90`,
-    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_USDT&interval=1d&limit=90`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_INR&interval=1d&startTime=${start}&endTime=${now}`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=I-${sym}_INR&interval=1d&startTime=${start}&endTime=${now}`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=${sym}INR&interval=1d&startTime=${start}&endTime=${now}`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_USDT&interval=1d&startTime=${start}&endTime=${now}`,
   ];
 
   for(const url of urls){
     try{
-      console.log('Trying candle URL:', url);
-      const r = await axios.get(url, {headers:H, timeout:8000});
+      console.log('Trying:', url.substring(0,80));
+      const r = await axios.get(url, {headers:H, timeout:10000});
       const data = r.data;
-      if(!data || !Array.isArray(data) || data.length === 0) continue;
+      if(!data || !Array.isArray(data) || data.length === 0){
+        console.log('Empty response');
+        continue;
+      }
+      console.log('Raw data sample:', JSON.stringify(data[0]));
       
-      // CoinDCX returns array of arrays: [timestamp, open, high, low, close, volume]
-      const candles = data.map(c => ({
-        date:   new Date(c[0]).toISOString().split('T')[0],
-        open:   parseFloat(c[1]),
-        high:   parseFloat(c[2]),
-        low:    parseFloat(c[3]),
-        close:  parseFloat(c[4]),
-        volume: parseFloat(c[5]||0),
+      // CoinDCX returns [timestamp, open, high, low, close, volume]
+      const candles = data.map(row => ({
+        date:   new Date(row[0]).toISOString().split('T')[0],
+        open:   parseFloat(row[1]),
+        high:   parseFloat(row[2]),
+        low:    parseFloat(row[3]),
+        close:  parseFloat(row[4]),
+        volume: parseFloat(row[5]||0),
       })).filter(c => c.close > 0);
-      
+
       if(candles.length > 0){
-        console.log(`✅ Candles OK for ${sym}: ${candles.length} candles from ${url}`);
+        console.log(`✅ Got ${candles.length} candles for ${sym}`);
         setCache('c:'+sym, candles, 300000);
         return candles;
       }
     }catch(e){
-      console.log('Candle URL failed:', url, e.message);
+      console.log('Failed:', e.message);
       continue;
     }
   }
-  console.log(`⚠️ No candles found for ${sym}`);
+  console.log(`⚠️ No candles for ${sym} — price-only mode`);
   return [];
 }
 
