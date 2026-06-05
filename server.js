@@ -220,54 +220,65 @@ async function getTicker(){
   return map;
 }
 
+// Get USD/INR rate from CoinDCX USDT ticker
+async function getUsdInr(){
+  const cached = getCache('usdinr');
+  if(cached) return cached;
+  try{
+    const tickers = await getTicker();
+    // USDT/INR rate from CoinDCX
+    const usdt = tickers['USDTINR'] || tickers['USDCINR'];
+    const rate = usdt ? parseFloat(usdt.last_price) : 84;
+    setCache('usdinr', rate, 60000);
+    console.log('USD/INR rate:', rate);
+    return rate;
+  }catch(e){ return 84; }
+}
+
+// Get candles from Binance (free, no rate limits, no key needed)
+// Binance uses USDT pairs, we convert to INR using live rate
 async function getCandles(sym){
   const cached = getCache('c:'+sym);
   if(cached) return cached;
 
-  const now = Date.now();
-  const start = now - (90 * 24 * 60 * 60 * 1000); // 90 days ago
+  // Binance symbol map (some coins have different symbols on Binance)
+  const BINANCE_SYM = {
+    'MATIC':'MATICUSDT','SHIB':'SHIBUSDT','PEPE':'PEPEUSDT',
+    'FLOKI':'FLOKIUSDT','BONK':'BONKUSDT','1INCH':'1INCHUSDT',
+  };
+  const bSym = BINANCE_SYM[sym] || `${sym}USDT`;
 
-  // CoinDCX requires startTime + endTime in milliseconds
-  const urls = [
-    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_INR&interval=1d&startTime=${start}&endTime=${now}`,
-    `https://public.coindcx.com/market_data/candlesticks?pair=I-${sym}_INR&interval=1d&startTime=${start}&endTime=${now}`,
-    `https://public.coindcx.com/market_data/candlesticks?pair=${sym}INR&interval=1d&startTime=${start}&endTime=${now}`,
-    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_USDT&interval=1d&startTime=${start}&endTime=${now}`,
-  ];
+  try{
+    console.log(`Fetching Binance candles: ${bSym}`);
+    const [candleRes, usdInr] = await Promise.all([
+      axios.get(`https://api.binance.com/api/v3/klines?symbol=${bSym}&interval=1d&limit=90`,
+        {headers:H, timeout:10000}),
+      getUsdInr()
+    ]);
 
-  for(const url of urls){
-    try{
-      console.log('Trying:', url.substring(0,80));
-      const r = await axios.get(url, {headers:H, timeout:10000});
-      const data = r.data;
-      if(!data || !Array.isArray(data) || data.length === 0){
-        console.log('Empty response');
-        continue;
-      }
-      console.log('Raw data sample:', JSON.stringify(data[0]));
-      
-      // CoinDCX returns [timestamp, open, high, low, close, volume]
-      const candles = data.map(row => ({
-        date:   new Date(row[0]).toISOString().split('T')[0],
-        open:   parseFloat(row[1]),
-        high:   parseFloat(row[2]),
-        low:    parseFloat(row[3]),
-        close:  parseFloat(row[4]),
-        volume: parseFloat(row[5]||0),
-      })).filter(c => c.close > 0);
-
-      if(candles.length > 0){
-        console.log(`✅ Got ${candles.length} candles for ${sym}`);
-        setCache('c:'+sym, candles, 300000);
-        return candles;
-      }
-    }catch(e){
-      console.log('Failed:', e.message);
-      continue;
+    const data = candleRes.data;
+    if(!data || !Array.isArray(data) || data.length === 0){
+      console.log(`No Binance data for ${bSym}`);
+      return [];
     }
+
+    // Binance format: [openTime, open, high, low, close, volume, closeTime, ...]
+    const candles = data.map(row => ({
+      date:   new Date(row[0]).toISOString().split('T')[0],
+      open:   parseFloat(row[1]) * usdInr,
+      high:   parseFloat(row[2]) * usdInr,
+      low:    parseFloat(row[3]) * usdInr,
+      close:  parseFloat(row[4]) * usdInr,
+      volume: parseFloat(row[5]),
+    })).filter(c => c.close > 0);
+
+    console.log(`✅ Binance candles for ${sym}: ${candles.length} days`);
+    setCache('c:'+sym, candles, 300000);
+    return candles;
+  }catch(e){
+    console.log(`Binance candle error for ${sym}:`, e.message);
+    return [];
   }
-  console.log(`⚠️ No candles for ${sym} — price-only mode`);
-  return [];
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
