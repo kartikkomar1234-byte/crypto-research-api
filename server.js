@@ -220,23 +220,47 @@ async function getTicker(){
   return map;
 }
 
-async function getCandles(candlePair){
-  const cached = getCache('c:'+candlePair);
+async function getCandles(sym){
+  const cached = getCache('c:'+sym);
   if(cached) return cached;
-  const r = await axios.get(
-    `https://public.coindcx.com/market_data/candlesticks?pair=${candlePair}&interval=1d&limit=90`,
-    {headers:H, timeout:10000}
-  );
-  const candles = (r.data||[]).map(c => ({
-    date:   new Date(c[0]).toISOString().split('T')[0],
-    open:   parseFloat(c[1]),
-    high:   parseFloat(c[2]),
-    low:    parseFloat(c[3]),
-    close:  parseFloat(c[4]),
-    volume: parseFloat(c[5]||0),
-  })).filter(c => c.close > 0);
-  setCache('c:'+candlePair, candles, 300000);
-  return candles;
+
+  // Try multiple CoinDCX candle URL formats
+  const urls = [
+    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_INR&interval=1d&limit=90`,
+    `https://public.coindcx.com/market_data/candles?pair=B-${sym}_INR&interval=1d&limit=90`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=I-${sym}_INR&interval=1d&limit=90`,
+    `https://public.coindcx.com/market_data/candlesticks?pair=B-${sym}_USDT&interval=1d&limit=90`,
+  ];
+
+  for(const url of urls){
+    try{
+      console.log('Trying candle URL:', url);
+      const r = await axios.get(url, {headers:H, timeout:8000});
+      const data = r.data;
+      if(!data || !Array.isArray(data) || data.length === 0) continue;
+      
+      // CoinDCX returns array of arrays: [timestamp, open, high, low, close, volume]
+      const candles = data.map(c => ({
+        date:   new Date(c[0]).toISOString().split('T')[0],
+        open:   parseFloat(c[1]),
+        high:   parseFloat(c[2]),
+        low:    parseFloat(c[3]),
+        close:  parseFloat(c[4]),
+        volume: parseFloat(c[5]||0),
+      })).filter(c => c.close > 0);
+      
+      if(candles.length > 0){
+        console.log(`✅ Candles OK for ${sym}: ${candles.length} candles from ${url}`);
+        setCache('c:'+sym, candles, 300000);
+        return candles;
+      }
+    }catch(e){
+      console.log('Candle URL failed:', url, e.message);
+      continue;
+    }
+  }
+  console.log(`⚠️ No candles found for ${sym}`);
+  return [];
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
@@ -286,7 +310,7 @@ app.get('/api/crypto/:coin', async (req,res) => {
 
     const [tickers, candles] = await Promise.all([
       getTicker(),
-      getCandles(coin.candle).catch(e => { console.log('Candle err:', e.message); return []; })
+      getCandles(sym).catch(e => { console.log('Candle err:', e.message); return []; })
     ]);
 
     const t = tickers[coin.ticker];
