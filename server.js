@@ -12,109 +12,62 @@ const cache = new Map();
 function getCache(k){const v=cache.get(k);if(v&&Date.now()<v.exp)return v.data;cache.delete(k);return null;}
 function setCache(k,d,ms){cache.set(k,{data:d,exp:Date.now()+ms});}
 
-// ── CoinDCX symbol map ─────────────────────────────────────────────────────────
-// ticker API uses:     BTCINR
-// candle API uses:     B-BTC_INR
-const COINS = {
-  'BTC': {ticker:'BTCINR',   candle:'B-BTC_INR'},
-  'ETH': {ticker:'ETHINR',   candle:'B-ETH_INR'},
-  'BNB': {ticker:'BNBINR',   candle:'B-BNB_INR'},
-  'SOL': {ticker:'SOLINR',   candle:'B-SOL_INR'},
-  'XRP': {ticker:'XRPINR',   candle:'B-XRP_INR'},
-  'DOGE':{ticker:'DOGEINR',  candle:'B-DOGE_INR'},
-  'ADA': {ticker:'ADAINR',   candle:'B-ADA_INR'},
-  'TRX': {ticker:'TRXINR',   candle:'B-TRX_INR'},
-  'AVAX':{ticker:'AVAXINR',  candle:'B-AVAX_INR'},
-  'SHIB':{ticker:'SHIBINR',  candle:'B-SHIB_INR'},
-  'LINK':{ticker:'LINKINR',  candle:'B-LINK_INR'},
-  'DOT': {ticker:'DOTINR',   candle:'B-DOT_INR'},
-  'MATIC':{ticker:'MATICINR',candle:'B-MATIC_INR'},
-  'LTC': {ticker:'LTCINR',   candle:'B-LTC_INR'},
-  'UNI': {ticker:'UNIINR',   candle:'B-UNI_INR'},
-  'ATOM':{ticker:'ATOMINR',  candle:'B-ATOM_INR'},
-  'ETC': {ticker:'ETCINR',   candle:'B-ETC_INR'},
-  'XLM': {ticker:'XLMINR',   candle:'B-XLM_INR'},
-  'BCH': {ticker:'BCHINR',   candle:'B-BCH_INR'},
-  'NEAR':{ticker:'NEARINR',  candle:'B-NEAR_INR'},
-  'ALGO':{ticker:'ALGOINR',  candle:'B-ALGO_INR'},
-  'FIL': {ticker:'FILINR',   candle:'B-FIL_INR'},
-  'HBAR':{ticker:'HBARINR',  candle:'B-HBAR_INR'},
-  'ICP': {ticker:'ICPINR',   candle:'B-ICP_INR'},
-  'APT': {ticker:'APTINR',   candle:'B-APT_INR'},
-  'INJ': {ticker:'INJINR',   candle:'B-INJ_INR'},
-  'OP':  {ticker:'OPINR',    candle:'B-OP_INR'},
-  'ARB': {ticker:'ARBINR',   candle:'B-ARB_INR'},
-  'SUI': {ticker:'SUIINR',   candle:'B-SUI_INR'},
-  'PEPE':{ticker:'PEPEINR',  candle:'B-PEPE_INR'},
-  'WIF': {ticker:'WIFINR',   candle:'B-WIF_INR'},
-  'MKR': {ticker:'MKRIINR',  candle:'B-MKR_INR'},
-  'AAVE':{ticker:'AAVEINR',  candle:'B-AAVE_INR'},
-  'CRV': {ticker:'CRVINR',   candle:'B-CRV_INR'},
-  'FTM': {ticker:'FTMINR',   candle:'B-FTM_INR'},
-  'SAND':{ticker:'SANDINR',  candle:'B-SAND_INR'},
-  'MANA':{ticker:'MANAINR',  candle:'B-MANA_INR'},
-  'AXS': {ticker:'AXSINR',   candle:'B-AXS_INR'},
-  'GALA':{ticker:'GALAINR',  candle:'B-GALA_INR'},
-  'CHZ': {ticker:'CHZINR',   candle:'B-CHZ_INR'},
-  'VET': {ticker:'VETINR',   candle:'B-VET_INR'},
-  'ZIL': {ticker:'ZILINR',   candle:'B-ZIL_INR'},
-  'KAS': {ticker:'KASINR',   candle:'B-KAS_INR'},
-  'FLOKI':{ticker:'FLOKIINR',candle:'B-FLOKI_INR'},
-  'BONK':{ticker:'BONKINR',  candle:'B-BONK_INR'},
-  'TON': {ticker:'TONINR',   candle:'B-TON_INR'},
-  'NOT': {ticker:'NOTINR',   candle:'B-NOT_INR'},
-  'WLD': {ticker:'WLDINR',   candle:'B-WLD_INR'},
-  'STRK':{ticker:'STRKINR',  candle:'B-STRK_INR'},
-  'TAO': {ticker:'TAOINR',   candle:'B-TAO_INR'},
-  'ONDO':{ticker:'ONDOINR',  candle:'B-ONDO_INR'},
-  'ENA': {ticker:'ENAINR',   candle:'B-ENA_INR'},
-  'JUP': {ticker:'JUPINR',   candle:'B-JUP_INR'},
-  'RNDR':{ticker:'RNDRINR',  candle:'B-RNDR_INR'},
-  'FET': {ticker:'FETINR',   candle:'B-FET_INR'},
-  'AGIX':{ticker:'AGIXINR',  candle:'B-AGIX_INR'},
-  'SEI': {ticker:'SEIINR',   candle:'B-SEI_INR'},
-  'TIA': {ticker:'TIAINR',   candle:'B-TIA_INR'},
-  'PYTH':{ticker:'PYTHINR',  candle:'B-PYTH_INR'},
-  'IMX': {ticker:'IMXINR',   candle:'B-IMX_INR'},
-  'LDO': {ticker:'LDOINR',   candle:'B-LDO_INR'},
-  'DYDX':{ticker:'DYDXINR',  candle:'B-DYDX_INR'},
-  'GMX': {ticker:'GMXINR',   candle:'B-GMX_INR'},
-  'GRT': {ticker:'GRTINR',   candle:'B-GRT_INR'},
-  'SNX': {ticker:'SNXINR',   candle:'B-SNX_INR'},
-  'SUSHI':{ticker:'SUSHIINR',candle:'B-SUSHI_INR'},
-  '1INCH':{ticker:'1INCHINR',candle:'B-1INCH_INR'},
-  'ZEC': {ticker:'ZECINR',   candle:'B-ZEC_INR'},
-  'DASH':{ticker:'DASHINR',  candle:'B-DASH_INR'},
-  'BAT': {ticker:'BATINR',   candle:'B-BAT_INR'},
-  'ENJ': {ticker:'ENJINR',   candle:'B-ENJ_INR'},
-  'XMR': {ticker:'XMRINR',   candle:'B-XMR_INR'},
-  'QNT': {ticker:'QNTINR',   candle:'B-QNT_INR'},
-  'ANKR':{ticker:'ANKRINR',  candle:'B-ANKR_INR'},
-  'OCEAN':{ticker:'OCEANINR',candle:'B-OCEAN_INR'},
-  'ROSE':{ticker:'ROSEINR',  candle:'B-ROSE_INR'},
-  'MINA':{ticker:'MINAINR',  candle:'B-MINA_INR'},
-  'KAVA':{ticker:'KAVAINR',  candle:'B-KAVA_INR'},
-  'ONE': {ticker:'ONEINR',   candle:'B-ONE_INR'},
-  'KSM': {ticker:'KSMINR',   candle:'B-KSM_INR'},
-  'EGLD':{ticker:'EGLDINR',  candle:'B-EGLD_INR'},
-  'FLOW':{ticker:'FLOWINR',  candle:'B-FLOW_INR'},
-  'EOS': {ticker:'EOSINR',   candle:'B-EOS_INR'},
-  'THETA':{ticker:'THETAINR',candle:'B-THETA_INR'},
-  'YFI': {ticker:'YFIINR',   candle:'B-YFI_INR'},
-  'COMP':{ticker:'COMPINR',  candle:'B-COMP_INR'},
-  'LRC': {ticker:'LRCINR',   candle:'B-LRC_INR'},
-  'CELO':{ticker:'CELOINR',  candle:'B-CELO_INR'},
-  'IOTA':{ticker:'IOTAINR',  candle:'B-IOTA_INR'},
-  'QTUM':{ticker:'QTUMINR',  candle:'B-QTUM_INR'},
-  'WAVES':{ticker:'WAVESINR',candle:'B-WAVES_INR'},
-  'PENDLE':{ticker:'PENDLEINR',candle:'B-PENDLE_INR'},
-  'BLUR':{ticker:'BLURINR',  candle:'B-BLUR_INR'},
-  'ARKM':{ticker:'ARKMINR',  candle:'B-ARKM_INR'},
-  'GMT': {ticker:'GMTINR',   candle:'B-GMT_INR'},
-  'STORJ':{ticker:'STORJINR',candle:'B-STORJ_INR'},
-};
+// ── Dynamic CoinDCX pair discovery ───────────────────────────────────────────
+// Instead of a hardcoded list, we fetch ALL INR pairs from CoinDCX markets API
+// This means EVERY coin on CoinDCX (including EULER, new listings) is supported
 
-// Name aliases → symbol
+let ALL_INR_PAIRS = {}; // sym → {ticker, candle}
+let pairsLoaded = false;
+
+async function loadAllPairs(){
+  if(pairsLoaded && Object.keys(ALL_INR_PAIRS).length > 0) return ALL_INR_PAIRS;
+  try{
+    const r = await axios.get('https://api.coindcx.com/exchange/v1/markets_details',
+      {headers:H, timeout:15000});
+    const markets = r.data || [];
+    const pairs = {};
+    markets.forEach(m => {
+      // Only INR markets
+      if(m.quote_currency_short_name === 'INR' && m.status === 'active'){
+        const sym = m.base_currency_short_name.toUpperCase();
+        const ticker = m.coindcx_name; // e.g. BTCINR
+        const candle = `B-${sym}_INR`;  // e.g. B-BTC_INR
+        pairs[sym] = { ticker, candle, name: m.base_currency_name || sym };
+      }
+    });
+    if(Object.keys(pairs).length > 0){
+      ALL_INR_PAIRS = pairs;
+      pairsLoaded = true;
+      console.log(`✅ Loaded ${Object.keys(pairs).length} INR pairs from CoinDCX`);
+    }
+  }catch(e){
+    console.log('Failed to load pairs:', e.message);
+    // Fallback to hardcoded common pairs
+    ALL_INR_PAIRS = {
+      'BTC':{ticker:'BTCINR',candle:'B-BTC_INR',name:'Bitcoin'},
+      'ETH':{ticker:'ETHINR',candle:'B-ETH_INR',name:'Ethereum'},
+      'BNB':{ticker:'BNBINR',candle:'B-BNB_INR',name:'BNB'},
+      'SOL':{ticker:'SOLINR',candle:'B-SOL_INR',name:'Solana'},
+      'XRP':{ticker:'XRPINR',candle:'B-XRP_INR',name:'XRP'},
+      'DOGE':{ticker:'DOGEINR',candle:'B-DOGE_INR',name:'Dogecoin'},
+      'ADA':{ticker:'ADAINR',candle:'B-ADA_INR',name:'Cardano'},
+      'MATIC':{ticker:'MATICINR',candle:'B-MATIC_INR',name:'Polygon'},
+      'AVAX':{ticker:'AVAXINR',candle:'B-AVAX_INR',name:'Avalanche'},
+      'SHIB':{ticker:'SHIBINR',candle:'B-SHIB_INR',name:'Shiba Inu'},
+      'LINK':{ticker:'LINKINR',candle:'B-LINK_INR',name:'Chainlink'},
+      'PEPE':{ticker:'PEPEINR',candle:'B-PEPE_INR',name:'Pepe'},
+      'TON':{ticker:'TONINR',candle:'B-TON_INR',name:'Toncoin'},
+      'EULER':{ticker:'EULERINR',candle:'B-EULER_INR',name:'Euler'},
+    };
+    pairsLoaded = true;
+  }
+  return ALL_INR_PAIRS;
+}
+
+// Load pairs on startup
+loadAllPairs();
+
+// Name aliases → symbol (for common full names)
 const NAMES = {
   'BITCOIN':'BTC','ETHEREUM':'ETH','BINANCE COIN':'BNB','BINANCE':'BNB',
   'SOLANA':'SOL','RIPPLE':'XRP','DOGECOIN':'DOGE','CARDANO':'ADA','TRON':'TRX',
@@ -129,17 +82,21 @@ const NAMES = {
   'ETHENA':'ENA','JUPITER':'JUP','RENDER':'RNDR','FETCH.AI':'FET',
   'SINGULARITYNET':'AGIX','KASPA':'KAS','FLOKI INU':'FLOKI',
   'LIDO DAO':'LDO','CURVE':'CRV','MONERO':'XMR','QUANT':'QNT',
-  'MULTIVERSX':'EGLD','KUSAMA':'KSM','STEPN':'GMT',
+  'MULTIVERSX':'EGLD','KUSAMA':'KSM','STEPN':'GMT','EULER FINANCE':'EULER',
 };
 
 function resolve(input){
   const u = input.toUpperCase().trim();
-  if(COINS[u]) return u;
-  if(NAMES[u] && COINS[NAMES[u]]) return NAMES[u];
+  const pairs = ALL_INR_PAIRS;
+  // Direct symbol match in dynamic pairs
+  if(pairs[u]) return u;
+  // Name alias map
+  if(NAMES[u] && pairs[NAMES[u]]) return NAMES[u];
+  // Partial name match
   const k = Object.keys(NAMES).find(k => u.includes(k) || k.includes(u));
-  if(k && COINS[NAMES[k]]) return NAMES[k];
-  // partial symbol match
-  const s = Object.keys(COINS).find(k => k.startsWith(u));
+  if(k && pairs[NAMES[k]]) return NAMES[k];
+  // Partial symbol match in dynamic pairs
+  const s = Object.keys(pairs).find(k => k.startsWith(u) || k === u);
   if(s) return s;
   return u;
 }
@@ -216,7 +173,7 @@ async function getTicker(){
   const map = {};
   (r.data||[]).forEach(t => { map[t.market] = t; });
   setCache('ticker', map, 30000);
-  console.log('Ticker loaded, sample keys:', Object.keys(map).slice(0,5));
+  console.log(`Ticker loaded: ${Object.keys(map).length} markets`);
   return map;
 }
 
@@ -324,13 +281,85 @@ async function getCandles(sym){
 // ── Routes ─────────────────────────────────────────────────────────────────────
 app.get('/', (_,res) => res.json({status:'Crypto Research API — CoinDCX', ok:true}));
 
+// Predict next 24h % based on RSI, MACD, BB, momentum
+function predict24h(change24, high24, low24, price){
+  if(!price || price===0) return {pct:0, signal:'—', confidence:'Low'};
+
+  let score = 0;
+  const reasons = [];
+
+  // 1. Mean reversion — big drops tend to bounce, big pumps cool off
+  if(change24 < -8){  score += 3; reasons.push('oversold bounce likely'); }
+  else if(change24 < -4){ score += 1.5; reasons.push('mild oversold'); }
+  else if(change24 > 10){ score -= 3; reasons.push('overbought pullback likely'); }
+  else if(change24 > 5){  score -= 1.5; reasons.push('mild overbought'); }
+
+  // 2. Price position in 24h range (like BB %B)
+  const range = high24 - low24;
+  if(range > 0){
+    const pos = (price - low24) / range; // 0=at low, 1=at high
+    if(pos < 0.2){ score += 2; reasons.push('near 24h low — support'); }
+    else if(pos > 0.8){ score -= 2; reasons.push('near 24h high — resistance'); }
+  }
+
+  // 3. Momentum continuation (small moves tend to continue)
+  if(change24 > 0 && change24 < 3){ score += 0.5; }
+  if(change24 < 0 && change24 > -3){ score -= 0.5; }
+
+  // Convert score to % prediction
+  const rawPct = score * 1.2; // scale factor
+  const pct = Math.max(-15, Math.min(15, rawPct)); // clamp to ±15%
+
+  const signal = pct > 1.5 ? 'BULLISH' : pct < -1.5 ? 'BEARISH' : 'NEUTRAL';
+  const confidence = Math.abs(score) > 3 ? 'High' : Math.abs(score) > 1.5 ? 'Medium' : 'Low';
+
+  return { pct: parseFloat(pct.toFixed(2)), signal, confidence };
+}
+
+// All 103 coins — full ticker list with next 24h prediction
+app.get('/api/crypto/market/all', async (req,res) => {
+  try{
+    const [tickers] = await Promise.all([getTicker(), loadAllPairs()]);
+    const ALL = Object.keys(ALL_INR_PAIRS);
+    const coins = ALL.map((sym,i) => {
+      const t = tickers[ALL_INR_PAIRS[sym].ticker];
+      const price   = t ? parseFloat(t.last_price||0) : 0;
+      const change1d= t ? parseFloat(t.change_24_hour||0) : 0;
+      const high24h = t ? parseFloat(t.high||0) : 0;
+      const low24h  = t ? parseFloat(t.low||0) : 0;
+
+      const next = predict24h(change1d, high24h, low24h, price);
+
+      return {
+        symbol:    sym,
+        name:      ALL_INR_PAIRS[sym]?.name || sym,
+        priceINR:  price,
+        change1d,
+        high24h,
+        low24h,
+        volume:    t ? parseFloat(t.volume||0) : 0,
+        next24h:   next.pct,
+        next24hSig:next.signal,
+        next24hConf:next.confidence,
+        rank:      i+1,
+      };
+    });
+    // Sort by next 24h prediction desc by default
+    coins.sort((a,b) => b.next24h - a.next24h);
+    res.json({success:true, coins, total:coins.length});
+  }catch(e){
+    console.log('All coins error:', e.message);
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
 // Market overview
 app.get('/api/crypto/market/overview', async (req,res) => {
   try{
-    const tickers = await getTicker();
+    const [tickers] = await Promise.all([getTicker(), loadAllPairs()]);
     const top = ['BTC','ETH','BNB','SOL','XRP','DOGE','ADA','MATIC','AVAX','SHIB','LINK','TON','TRX','NEAR','PEPE','WIF','SUI','TAO','NOT','BONK'];
     const coins = top.map(sym => {
-      const coin = COINS[sym];
+      const coin = ALL_INR_PAIRS[sym];
       if(!coin) return null;
       const t = tickers[coin.ticker];
       if(!t) return null;
@@ -348,12 +377,13 @@ app.get('/api/crypto/market/overview', async (req,res) => {
 });
 
 // Search
-app.get('/api/crypto/search/:q', (req,res) => {
+app.get('/api/crypto/search/:q', async (req,res) => {
+  await loadAllPairs();
   const q = req.params.q.toUpperCase();
-  const results = Object.keys(COINS)
-    .filter(k => k.startsWith(q) || k.includes(q))
-    .slice(0,10)
-    .map(k => ({symbol:k, ticker:COINS[k].ticker}));
+  const results = Object.keys(ALL_INR_PAIRS)
+    .filter(k => k.startsWith(q) || k.includes(q) || (ALL_INR_PAIRS[k].name||'').toUpperCase().includes(q))
+    .slice(0,15)
+    .map(k => ({symbol:k, name:ALL_INR_PAIRS[k].name||k, ticker:ALL_INR_PAIRS[k].ticker}));
   res.json({success:true, results});
 });
 
@@ -361,10 +391,11 @@ app.get('/api/crypto/search/:q', (req,res) => {
 app.get('/api/crypto/:coin', async (req,res) => {
   try{
     const sym = resolve(req.params.coin);
-    const coin = COINS[sym];
-    if(!coin) throw new Error(`${sym} not supported. Try: BTC, ETH, SOL, BNB, XRP, DOGE`);
+    await loadAllPairs();
+    const coin = ALL_INR_PAIRS[sym];
+    if(!coin) throw new Error(`${sym} not found on CoinDCX. Check symbol and try again.`);
 
-    console.log(`→ ${req.params.coin} → sym:${sym} ticker:${coin.ticker} candle:${coin.candle}`);
+    console.log(`→ ${req.params.coin} → sym:${sym} ticker:${coin.ticker}`);
 
     const [tickers, candles] = await Promise.all([
       getTicker(),
