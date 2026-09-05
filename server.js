@@ -1004,17 +1004,44 @@ app.get('/api/bot/balance', async (req,res) => {
 app.post('/api/bot/buy', async (req,res) => {
   try{
     const { symbol, price, quantity } = req.body;
+    // CoinDCX requires market order format
     const body = {
       side: 'buy',
       order_type: 'limit_order',
-      market: symbol + 'INR',
-      price_per_unit: price,
-      total_quantity: quantity,
+      market: `${symbol}INR`,
+      price_per_unit: parseFloat(price),
+      total_quantity: parseFloat(quantity),
       timestamp: Date.now(),
     };
+    console.log('Placing buy order:', JSON.stringify(body));
     const data = await dcxPost('/exchange/v1/orders/create', body);
+    console.log('Order response:', JSON.stringify(data));
     res.json({ success:true, order: data });
-  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+  }catch(e){
+    console.log('Buy error:', e.response?.data || e.message);
+    res.status(500).json({ success:false, error: e.response?.data || e.message });
+  }
+});
+
+// Place a market buy order (instant fill)
+app.post('/api/bot/buy_market', async (req,res) => {
+  try{
+    const { symbol, amount_inr } = req.body;
+    const body = {
+      side: 'buy',
+      order_type: 'market_order',
+      market: `${symbol}INR`,
+      notional: parseFloat(amount_inr),
+      timestamp: Date.now(),
+    };
+    console.log('Placing market buy:', JSON.stringify(body));
+    const data = await dcxPost('/exchange/v1/orders/create', body);
+    console.log('Market order response:', JSON.stringify(data));
+    res.json({ success:true, order: data });
+  }catch(e){
+    console.log('Market buy error:', e.response?.data || e.message);
+    res.status(500).json({ success:false, error: e.response?.data || e.message });
+  }
 });
 
 // Place a sell order
@@ -1024,14 +1051,18 @@ app.post('/api/bot/sell', async (req,res) => {
     const body = {
       side: 'sell',
       order_type: 'limit_order',
-      market: symbol + 'INR',
-      price_per_unit: price,
-      total_quantity: quantity,
+      market: `${symbol}INR`,
+      price_per_unit: parseFloat(price),
+      total_quantity: parseFloat(quantity),
       timestamp: Date.now(),
     };
+    console.log('Placing sell order:', JSON.stringify(body));
     const data = await dcxPost('/exchange/v1/orders/create', body);
     res.json({ success:true, order: data });
-  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+  }catch(e){
+    console.log('Sell error:', e.response?.data || e.message);
+    res.status(500).json({ success:false, error: e.response?.data || e.message });
+  }
 });
 
 // Get open orders
