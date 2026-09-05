@@ -967,3 +967,78 @@ app.get('/api/news/:query', async (req,res) => {
 });
 
 app.listen(PORT, () => console.log(`✅ Crypto API (CoinDCX) running on port ${PORT}`));
+
+// ─── CoinDCX Auto Trading Bot ─────────────────────────────────────────────────
+const crypto = require('crypto');
+
+const DCX_KEY    = 'd62016ee25606765061851dccff09e49e96329d78697eeaf';
+const DCX_SECRET = 'a33c74fe85cbf84a8a429f21b2a1e4d7bdf67eedaeb7ec244284ec0d75167cbc';
+
+function dcxSign(body){
+  return crypto.createHmac('sha256', DCX_SECRET).update(JSON.stringify(body)).digest('hex');
+}
+
+async function dcxPost(endpoint, body){
+  const signature = dcxSign(body);
+  const r = await axios.post(`https://api.coindcx.com${endpoint}`, body, {
+    headers:{
+      'X-AUTH-APIKEY': DCX_KEY,
+      'X-AUTH-SIGNATURE': signature,
+      'Content-Type': 'application/json',
+    },
+    timeout: 10000,
+  });
+  return r.data;
+}
+
+// Get account balances
+app.get('/api/bot/balance', async (req,res) => {
+  try{
+    const body = { timestamp: Date.now() };
+    const data = await dcxPost('/exchange/v1/users/balances', body);
+    res.json({ success:true, balances: data });
+  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+});
+
+// Place a buy order
+app.post('/api/bot/buy', async (req,res) => {
+  try{
+    const { symbol, price, quantity } = req.body;
+    const body = {
+      side: 'buy',
+      order_type: 'limit_order',
+      market: symbol + 'INR',
+      price_per_unit: price,
+      total_quantity: quantity,
+      timestamp: Date.now(),
+    };
+    const data = await dcxPost('/exchange/v1/orders/create', body);
+    res.json({ success:true, order: data });
+  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+});
+
+// Place a sell order
+app.post('/api/bot/sell', async (req,res) => {
+  try{
+    const { symbol, price, quantity } = req.body;
+    const body = {
+      side: 'sell',
+      order_type: 'limit_order',
+      market: symbol + 'INR',
+      price_per_unit: price,
+      total_quantity: quantity,
+      timestamp: Date.now(),
+    };
+    const data = await dcxPost('/exchange/v1/orders/create', body);
+    res.json({ success:true, order: data });
+  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+});
+
+// Get open orders
+app.get('/api/bot/orders', async (req,res) => {
+  try{
+    const body = { timestamp: Date.now() };
+    const data = await dcxPost('/exchange/v1/orders/active_orders_count', body);
+    res.json({ success:true, orders: data });
+  }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+});
