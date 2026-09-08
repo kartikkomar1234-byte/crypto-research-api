@@ -539,6 +539,131 @@ function predict24h(change24, high24, low24, price){
   return { pct: parseFloat(pct.toFixed(2)), signal, confidence };
 }
 
+// ── Enhanced Signal Engine ───────────────────────────────────────────────────
+
+// 1. News catalyst detector
+async function getNewsSentiment(sym){
+  try{
+    const q = encodeURIComponent(`${sym} crypto`);
+    const r = await axios.get(
+      `https://news.google.com/rss/search?q=${q}&hl=en-IN&gl=IN&ceid=IN:en`,
+      {headers:H, timeout:5000}
+    );
+    const text = r.data.toLowerCase();
+    const bullishHigh = ['listing','listed','binance','coinbase','partnership','launch','upgrade','mainnet','airdrop','burn','etf'];
+    const bullishMed  = ['buy','rally','surge','pump','gain','bullish','breakout','adoption'];
+    const bearish     = ['hack','exploit','crash','lawsuit','ban','dump','scam','rug'];
+    let newsScore = 0;
+    const catalysts = [];
+    bullishHigh.forEach(w => { if(text.includes(w)){ newsScore+=20; catalysts.push(`🔥 ${w.toUpperCase()} news detected`); }});
+    bullishMed.forEach(w  => { if(text.includes(w)) newsScore+=8; });
+    bearish.forEach(w     => { if(text.includes(w)){ newsScore-=15; catalysts.push(`⚠️ ${w} in news`); }});
+    const articleCount = (r.data.match(/<item>/g)||[]).length;
+    if(articleCount > 5) newsScore += 10;
+    return { newsScore: Math.min(60, Math.max(-40, newsScore)), catalysts, articleCount };
+  }catch(e){ return { newsScore:0, catalysts:[], articleCount:0 }; }
+}
+
+// 2. Volume spike
+function getVolumeSpike(volume, change24h){
+  // Use change24h magnitude as proxy for volume spike
+  let spikeScore = 0, spikeLabel = '';
+  if(Math.abs(change24h) > 30 && volume > 1000000){
+    spikeScore = 35; spikeLabel = '🐋 WHALE ALERT! Massive volume spike';
+  } else if(Math.abs(change24h) > 20 && volume > 500000){
+    spikeScore = 25; spikeLabel = '🔥 Major volume surge detected';
+  } else if(Math.abs(change24h) > 10 && volume > 200000){
+    spikeScore = 15; spikeLabel = '📈 Significant volume activity';
+  } else if(volume > 5000000){
+    spikeScore = 15; spikeLabel = '💧 Very high base volume';
+  } else if(volume > 1000000){
+    spikeScore = 8;  spikeLabel = '💧 Good volume';
+  } else if(volume < 50000){
+    spikeScore = -15; spikeLabel = '⚠️ Very low volume — risky';
+  }
+  return { spikeScore, spikeLabel };
+}
+
+// 3. Momentum
+function getMomentum(change24h){
+  if(change24h >= 15 && change24h <= 30){ return { momentumScore:25, momentumLabel:`🚀 Strong momentum +${change24h.toFixed(1)}% — may continue` }; }
+  if(change24h >= 8  && change24h < 15){  return { momentumScore:20, momentumLabel:`📈 Good momentum +${change24h.toFixed(1)}%` }; }
+  if(change24h >= 3  && change24h < 8){   return { momentumScore:12, momentumLabel:`🟢 Early move +${change24h.toFixed(1)}%` }; }
+  if(change24h > 30){                     return { momentumScore:5,  momentumLabel:`⚠️ Already pumped +${change24h.toFixed(1)}% — chasing risky` }; }
+  if(change24h <= -15){ return { momentumScore:15, momentumLabel:`🎯 Deep dip ${change24h.toFixed(1)}% — bounce likely` }; }
+  if(change24h <= -8){  return { momentumScore:18, momentumLabel:`📉 Good dip ${change24h.toFixed(1)}% — prime entry` }; }
+  return { momentumScore:3, momentumLabel:'' };
+}
+
+// 4. Top gainer detector
+function getGainerScore(change24h, volume){
+  if(change24h >= 20 && volume > 1000000){ return { gainerScore:30, gainerLabel:'🏆 TOP GAINER with high volume — real catalyst exists!' }; }
+  if(change24h >= 10 && volume > 500000){  return { gainerScore:20, gainerLabel:'⭐ Strong gainer with good volume' }; }
+  if(change24h >= 5  && volume > 200000){  return { gainerScore:10, gainerLabel:'✅ Early mover — momentum building' }; }
+  return { gainerScore:0, gainerLabel:'' };
+}
+
+// ── Enhanced Day Trade Score ──────────────────────────────────────────────────
+async function enhancedScore(sym, priceINR, change1d, high24h, low24h, volume){
+  const range   = high24h - low24h;
+  const rangePct = low24h > 0 ? (range/low24h)*100 : 0;
+
+  // Technical base
+  let techScore = 0;
+  if(rangePct > 30) techScore += 30;
+  else if(rangePct > 20) techScore += 22;
+  else if(rangePct > 12) techScore += 14;
+  else if(rangePct > 6)  techScore += 7;
+
+  if(range > 0){
+    const pos = (priceINR-low24h)/range;
+    if(pos < 0.2) techScore += 25;
+    else if(pos < 0.3) techScore += 15;
+    else if(pos > 0.85) techScore -= 10;
+  }
+  if(priceINR < 0.01) techScore += 15;
+  else if(priceINR < 1) techScore += 10;
+  else if(priceINR < 10) techScore += 5;
+
+  // Enhanced signals
+  const vol     = getVolumeSpike(volume, change1d);
+  const mom     = getMomentum(change1d);
+  const gain    = getGainerScore(change1d, volume);
+  const news    = await getNewsSentiment(sym);
+
+  const total = techScore + vol.spikeScore + mom.momentumScore + gain.gainerScore + news.newsScore;
+
+  const reasons = [];
+  if(vol.spikeLabel)  reasons.push(vol.spikeLabel);
+  if(mom.momentumLabel) reasons.push(mom.momentumLabel);
+  if(gain.gainerLabel) reasons.push(gain.gainerLabel);
+  news.catalysts.forEach(n => reasons.push(n));
+  if(news.articleCount > 3) reasons.push(`📰 ${news.articleCount} news articles — high attention`);
+
+  // Strategy
+  let strategy = 'SWING';
+  if(change1d >= 8 && volume > 500000) strategy = 'MOMENTUM';
+  else if(change1d <= -8) strategy = 'DIP_BUY';
+  else if(news.newsScore >= 20) strategy = 'NEWS_CATALYST';
+  else if(Math.abs(change1d) > 20 && volume > 1000000) strategy = 'WHALE_MOVE';
+
+  // Best target
+  const score = Math.round(Math.min(100, Math.max(0, total)));
+  let bestTarget = 25;
+  if(score >= 80 && rangePct >= 25) bestTarget = 75;
+  else if(score >= 65 && rangePct >= 15) bestTarget = 50;
+
+  return {
+    score, techScore, newsScore:news.newsScore,
+    volSpikeScore:vol.spikeScore, momentumScore:mom.momentumScore,
+    gainerScore:gain.gainerScore, newsArticles:news.articleCount,
+    reasons, strategy, rangePct:parseFloat(rangePct.toFixed(1)),
+    bestTarget, potentialPct:parseFloat(Math.min(120,rangePct*1.2).toFixed(1)),
+    entry:priceINR, target25:priceINR*1.25, target50:priceINR*1.50,
+    target75:priceINR*1.75, stopLoss:priceINR*0.92,
+  };
+}
+
 // ── Day Trade Finder ──────────────────────────────────────────────────────────
 // Finds coins with highest potential for 25-75%+ moves in 24h
 // Based on: volume surge, price momentum, volatility, recent breakout
@@ -739,8 +864,9 @@ app.get('/api/crypto/daytrade', async (req,res) => {
     const [tickers] = await Promise.all([getTicker(), loadAllPairs()]);
     const ALL = Object.keys(ALL_INR_PAIRS);
 
-    const candidates = [];
-    ALL.forEach((sym,i) => {
+    // Build coin list with basic data
+    const coins = [];
+    ALL.forEach(sym => {
       const t = tickers[ALL_INR_PAIRS[sym].ticker];
       if(!t) return;
       const price   = parseFloat(t.last_price||0);
@@ -749,46 +875,65 @@ app.get('/api/crypto/daytrade', async (req,res) => {
       const low24h  = parseFloat(t.low||0);
       const volume  = parseFloat(t.volume||0);
       if(price === 0) return;
-
-      const analysis = dayTradeScore({
-        symbol:sym, change1d, high24h, low24h, priceINR:price, volume
-      });
-      if(!analysis) return;
-
-      candidates.push({
-        symbol:    sym,
-        name:      ALL_INR_PAIRS[sym]?.name || sym,
-        priceINR:  price,
-        change1d,
-        high24h,
-        low24h,
-        volume,
-        score:           analysis.score,
-        reasons:         analysis.reasons,
-        warnings:        analysis.warnings,
-        strategy:        analysis.strategy,
-        potentialPct:    analysis.potentialPct,
-        rangePct:        analysis.rangePct,
-        bestTarget:      analysis.bestTarget,
-        bestTargetReason:analysis.bestTargetReason,
-        entry:           analysis.entry,
-        target25:        analysis.target25,
-        target50:        analysis.target50,
-        target75:        analysis.target75,
-        stopLoss:        analysis.stopLoss,
-      });
+      coins.push({symbol:sym, priceINR:price, change1d, high24h, low24h, volume});
     });
 
-    // Sort by score descending
-    candidates.sort((a,b) => b.score - a.score);
+    // Quick pre-filter: must have some volume and price movement
+    const filtered = coins.filter(c => c.volume > 50000);
 
-    // Top 20 candidates
-    const top = candidates.slice(0,20);
+    // Sort by potential quickly first (volume + range)
+    filtered.sort((a,b) => {
+      const aRange = a.high24h > 0 ? (a.high24h-a.low24h)/a.low24h*100 : 0;
+      const bRange = b.high24h > 0 ? (b.high24h-b.low24h)/b.low24h*100 : 0;
+      return (bRange * Math.log(b.volume+1)) - (aRange * Math.log(a.volume+1));
+    });
+
+    // Take top 40 for enhanced scoring (with news)
+    const top40 = filtered.slice(0, 40);
+
+    // Run enhanced scoring with news for top 40
+    const scored = await Promise.all(
+      top40.map(async coin => {
+        const analysis = await enhancedScore(coin.symbol,coin.priceINR,coin.change1d,coin.high24h,coin.low24h,coin.volume);
+        if(!analysis) return null;
+        return {
+          symbol:          coin.symbol,
+          name:            ALL_INR_PAIRS[coin.symbol]?.name || coin.symbol,
+          priceINR:        coin.priceINR,
+          change1d:        coin.change1d,
+          high24h:         coin.high24h,
+          low24h:          coin.low24h,
+          volume:          coin.volume,
+          score:           analysis.score,
+          techScore:       analysis.techScore,
+          newsScore:       analysis.newsScore,
+          volSpikeScore:   analysis.volSpikeScore,
+          momentumScore:   analysis.momentumScore,
+          gainerScore:     analysis.gainerScore,
+          reasons:         analysis.reasons,
+          warnings:        analysis.warnings,
+          strategy:        analysis.strategy,
+          potentialPct:    analysis.potentialPct,
+          rangePct:        analysis.rangePct,
+          bestTarget:      analysis.bestTarget,
+          spikeRatio:      analysis.spikeRatio,
+          newsArticles:    analysis.newsArticles,
+          entry:           analysis.entry,
+          target25:        analysis.target25,
+          target50:        analysis.target50,
+          target75:        analysis.target75,
+          stopLoss:        analysis.stopLoss,
+        };
+      })
+    );
+
+    const candidates = scored.filter(Boolean).sort((a,b) => b.score - a.score);
+
     res.json({
       success: true,
-      candidates: top,
+      candidates: candidates.slice(0,20),
       total: candidates.length,
-      disclaimer: 'Day trading is extremely risky. 25-75% targets are NOT guaranteed. Always use stop loss. Never invest more than you can afford to lose.',
+      disclaimer: 'Signals based on technical analysis + news + volume. Not guaranteed. Always use stop loss.',
     });
   }catch(e){
     console.log('Daytrade error:', e.message);
