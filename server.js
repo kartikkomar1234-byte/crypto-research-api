@@ -605,10 +605,52 @@ function getGainerScore(change24h, volume){
 
 // ── Enhanced Day Trade Score ──────────────────────────────────────────────────
 async function enhancedScore(sym, priceINR, change1d, high24h, low24h, volume){
-  const range   = high24h - low24h;
+  const range    = high24h - low24h;
   const rangePct = low24h > 0 ? (range/low24h)*100 : 0;
 
-  // Technical base
+  // ── FIX 4: Get REAL indicators from candle data ──────────────────────────
+  // Day Trade now uses the SAME engine as Search — no more two systems
+  let rsi = null, macd = null, bbPct = null, regime = null, bullishProb = null;
+  let hasCandleData = false;
+
+  try{
+    const candles = await getCandles(sym);
+    if(candles && candles.length >= 30){
+      hasCandleData = true;
+      const closes = candles.map(c => c.close);
+      rsi   = calcRSI(closes);
+      macd  = calcMACD(closes);
+      const bbArr = calcBB(closes);
+      bbPct = bbArr.at(-1)?.percent ?? 0.5;
+      const patterns = detectPatterns(candles);
+      const avgVol   = candles.slice(-20).reduce((s,h)=>s+(h.volume||0),0)/20;
+      const lastVol  = candles.at(-1)?.volume || 0;
+      const prob     = buildProbability(rsi, macd, bbPct, change1d, patterns, lastVol, avgVol);
+      bullishProb    = prob.bullishProbability;
+      regime         = detectRegime(candles, rsi, change1d).regime;
+    }
+  }catch(e){ hasCandleData = false; }
+
+  // ── FIX 3: HARD REJECT — no candle data means we are guessing ────────────
+  if(!hasCandleData){
+    return { rejected:true, rejectReason:'No historical data — cannot analyse safely', score:0 };
+  }
+
+  // ── FIX 2: HARD REJECT — RSI above 65 is overbought ─────────────────────
+  if(rsi > 65){
+    return { rejected:true, rejectReason:`RSI ${rsi.toFixed(0)} — already overbought, likely to fall`, score:0 };
+  }
+
+  // ── FIX 5: HARD REJECT — need volume and uptrend confirmation ───────────
+  if(volume < 1000000){
+    return { rejected:true, rejectReason:`Volume only ₹${(volume/100000).toFixed(1)}L — too low to exit safely`, score:0 };
+  }
+  const regimeOk = regime && (regime.includes('Uptrend') || regime.includes('Consolidation'));
+  if(!regimeOk){
+    return { rejected:true, rejectReason:`Market regime is ${regime} — not favourable`, score:0 };
+  }
+
+  // ── Technical base ───────────────────────────────────────────────────────
   let techScore = 0;
   if(rangePct > 30) techScore += 30;
   else if(rangePct > 20) techScore += 22;
@@ -625,42 +667,70 @@ async function enhancedScore(sym, priceINR, change1d, high24h, low24h, volume){
   else if(priceINR < 1) techScore += 10;
   else if(priceINR < 10) techScore += 5;
 
-  // Enhanced signals
-  const vol     = getVolumeSpike(volume, change1d);
-  const mom     = getMomentum(change1d);
-  const gain    = getGainerScore(change1d, volume);
-  const news    = await getNewsSentiment(sym);
+  // ── FIX 1: RSI now contributes directly ─────────────────────────────────
+  let rsiScore = 0;
+  if(rsi < 30)      rsiScore = 25;
+  else if(rsi < 40) rsiScore = 20;
+  else if(rsi < 50) rsiScore = 12;
+  else if(rsi < 60) rsiScore = 5;
+  else              rsiScore = -10;
 
-  const total = techScore + vol.spikeScore + mom.momentumScore + gain.gainerScore + news.newsScore;
+  // MACD contribution
+  let macdScore = 0;
+  if(macd && macd.macd > macd.signal) macdScore = 15;
+  else macdScore = -10;
 
+  // ── Other signals ────────────────────────────────────────────────────────
+  const vol  = getVolumeSpike(volume, change1d);
+  const mom  = getMomentum(change1d);
+  const gain = getGainerScore(change1d, volume);
+  const news = await getNewsSentiment(sym);
+
+  // ── FIX 4: PENALISE already-pumped coins instead of rewarding ───────────
+  let pumpPenalty = 0;
+  if(change1d > 40)      pumpPenalty = -50;
+  else if(change1d > 25) pumpPenalty = -35;
+  else if(change1d > 20) pumpPenalty = -20;
+
+  const total = techScore + rsiScore + macdScore + vol.spikeScore +
+                mom.momentumScore + gain.gainerScore + news.newsScore + pumpPenalty;
+
+  // ── Reasons ──────────────────────────────────────────────────────────────
   const reasons = [];
-  if(vol.spikeLabel)  reasons.push(vol.spikeLabel);
+  reasons.push(`📊 RSI ${rsi.toFixed(0)} — ${rsi<30?'deeply oversold':rsi<40?'oversold':rsi<50?'recovering':'neutral'}`);
+  reasons.push(`📈 Regime: ${regime}`);
+  if(bullishProb) reasons.push(`🎯 Bullish probability: ${bullishProb}%`);
+  if(macd && macd.macd > macd.signal) reasons.push('✅ MACD bullish crossover');
+  if(vol.spikeLabel)    reasons.push(vol.spikeLabel);
   if(mom.momentumLabel) reasons.push(mom.momentumLabel);
-  if(gain.gainerLabel) reasons.push(gain.gainerLabel);
+  if(gain.gainerLabel)  reasons.push(gain.gainerLabel);
   news.catalysts.forEach(n => reasons.push(n));
-  if(news.articleCount > 3) reasons.push(`📰 ${news.articleCount} news articles — high attention`);
+  if(pumpPenalty < 0) reasons.push(`⚠️ Already up ${change1d.toFixed(0)}% today — penalised for chase risk`);
 
   // Strategy
   let strategy = 'SWING';
-  if(change1d >= 8 && volume > 500000) strategy = 'MOMENTUM';
-  else if(change1d <= -8) strategy = 'DIP_BUY';
+  if(change1d <= -8 && rsi < 40) strategy = 'DIP_BUY';
+  else if(change1d >= 5 && change1d <= 15 && rsi < 60) strategy = 'MOMENTUM';
   else if(news.newsScore >= 20) strategy = 'NEWS_CATALYST';
-  else if(Math.abs(change1d) > 20 && volume > 1000000) strategy = 'WHALE_MOVE';
 
-  // Best target
   const score = Math.round(Math.min(100, Math.max(0, total)));
-  let bestTarget = 25;
-  if(score >= 80 && rangePct >= 25) bestTarget = 75;
-  else if(score >= 65 && rangePct >= 15) bestTarget = 50;
+
+  // ── FIX 5: Conservative targets — 10% is the realistic goal ─────────────
+  let bestTarget = 10;
+  if(score >= 75 && rangePct >= 20) bestTarget = 25;
+  else if(score >= 60) bestTarget = 15;
 
   return {
-    score, techScore, newsScore:news.newsScore,
-    volSpikeScore:vol.spikeScore, momentumScore:mom.momentumScore,
-    gainerScore:gain.gainerScore, newsArticles:news.articleCount,
+    rejected:false,
+    score, techScore, rsiScore, macdScore,
+    rsi:parseFloat(rsi.toFixed(2)), regime, bullishProb,
+    newsScore:news.newsScore, volSpikeScore:vol.spikeScore,
+    momentumScore:mom.momentumScore, gainerScore:gain.gainerScore,
+    pumpPenalty, newsArticles:news.articleCount,
     reasons, strategy, rangePct:parseFloat(rangePct.toFixed(1)),
-    bestTarget, potentialPct:parseFloat(Math.min(120,rangePct*1.2).toFixed(1)),
-    entry:priceINR, target25:priceINR*1.25, target50:priceINR*1.50,
-    target75:priceINR*1.75, stopLoss:priceINR*0.92,
+    bestTarget, potentialPct:parseFloat(Math.min(50,rangePct*0.8).toFixed(1)),
+    entry:priceINR, target10:priceINR*1.10, target25:priceINR*1.25,
+    target50:priceINR*1.50, target75:priceINR*1.75, stopLoss:priceINR*0.92,
   };
 }
 
@@ -891,11 +961,16 @@ app.get('/api/crypto/daytrade', async (req,res) => {
     // Take top 40 for enhanced scoring (with news)
     const top40 = filtered.slice(0, 40);
 
-    // Run enhanced scoring with news for top 40
+    // Run enhanced scoring with real indicators + news for top 40
+    const rejected = [];
     const scored = await Promise.all(
       top40.map(async coin => {
-        const analysis = await enhancedScore(coin.symbol,coin.priceINR,coin.change1d,coin.high24h,coin.low24h,coin.volume);
-        if(!analysis) return null;
+        const a = await enhancedScore(coin.symbol,coin.priceINR,coin.change1d,coin.high24h,coin.low24h,coin.volume);
+        if(!a) return null;
+        if(a.rejected){
+          rejected.push({symbol:coin.symbol, reason:a.rejectReason});
+          return null;
+        }
         return {
           symbol:          coin.symbol,
           name:            ALL_INR_PAIRS[coin.symbol]?.name || coin.symbol,
@@ -904,36 +979,53 @@ app.get('/api/crypto/daytrade', async (req,res) => {
           high24h:         coin.high24h,
           low24h:          coin.low24h,
           volume:          coin.volume,
-          score:           analysis.score,
-          techScore:       analysis.techScore,
-          newsScore:       analysis.newsScore,
-          volSpikeScore:   analysis.volSpikeScore,
-          momentumScore:   analysis.momentumScore,
-          gainerScore:     analysis.gainerScore,
-          reasons:         analysis.reasons,
-          warnings:        analysis.warnings,
-          strategy:        analysis.strategy,
-          potentialPct:    analysis.potentialPct,
-          rangePct:        analysis.rangePct,
-          bestTarget:      analysis.bestTarget,
-          spikeRatio:      analysis.spikeRatio,
-          newsArticles:    analysis.newsArticles,
-          entry:           analysis.entry,
-          target25:        analysis.target25,
-          target50:        analysis.target50,
-          target75:        analysis.target75,
-          stopLoss:        analysis.stopLoss,
+          score:           a.score,
+          techScore:       a.techScore,
+          rsi:             a.rsi,
+          regime:          a.regime,
+          bullishProb:     a.bullishProb,
+          rsiScore:        a.rsiScore,
+          macdScore:       a.macdScore,
+          pumpPenalty:     a.pumpPenalty,
+          newsScore:       a.newsScore,
+          volSpikeScore:   a.volSpikeScore,
+          momentumScore:   a.momentumScore,
+          gainerScore:     a.gainerScore,
+          reasons:         a.reasons,
+          warnings:        a.warnings || [],
+          strategy:        a.strategy,
+          potentialPct:    a.potentialPct,
+          rangePct:        a.rangePct,
+          bestTarget:      a.bestTarget,
+          newsArticles:    a.newsArticles,
+          entry:           parseFloat(a.entry.toFixed(8)),
+          target10:        parseFloat(a.target10.toFixed(8)),
+          target25:        parseFloat(a.target25.toFixed(8)),
+          target50:        parseFloat(a.target50.toFixed(8)),
+          target75:        parseFloat(a.target75.toFixed(8)),
+          stopLoss:        parseFloat(a.stopLoss.toFixed(8)),
         };
       })
     );
 
     const candidates = scored.filter(Boolean).sort((a,b) => b.score - a.score);
+    console.log(`Daytrade: ${top40.length} analysed, ${candidates.length} passed filters, ${rejected.length} rejected`);
 
     res.json({
       success: true,
       candidates: candidates.slice(0,20),
       total: candidates.length,
-      disclaimer: 'Signals based on technical analysis + news + volume. Not guaranteed. Always use stop loss.',
+      analysed: top40.length,
+      rejected: rejected.slice(0,15),
+      rejectedCount: rejected.length,
+      filters: [
+        'RSI must be below 65 (not overbought)',
+        'Must have 30+ days of historical data',
+        'Volume must be above Rs 10 Lakh',
+        'Market regime must be Uptrend or Consolidation',
+        'Coins already up 20%+ today are penalised',
+      ],
+      disclaimer: 'Signals are estimates from technical analysis. No system reliably produces 10% per day. Always use stop loss and never invest more than you can afford to lose.',
     });
   }catch(e){
     console.log('Daytrade error:', e.message);
