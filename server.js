@@ -1121,6 +1121,14 @@ app.get('/api/crypto/:coin', async (req,res) => {
       macdSignal: i === candles.length-1 ? macd.signal : null,
     }));
 
+    // Real cost calculation (slippage + fees per AlgoTest workshop)
+    const TOTAL_COST_PCT  = 1.4; // 0.4% fees + 1% slippage = 1.4% per round trip
+    const realEntry       = parseFloat((priceINR*1.005).toFixed(8)); // +0.5% slippage
+    const realTarget10    = parseFloat((priceINR*1.10*0.995).toFixed(8)); // −0.5% slippage on exit
+    const realTarget25    = parseFloat((priceINR*1.25*0.995).toFixed(8));
+    const realStopLoss    = parseFloat((priceINR*0.92*0.995).toFixed(8));
+    const netProfit10pct  = parseFloat((10 - TOTAL_COST_PCT).toFixed(2)); // real net after costs
+
     res.json({success:true, data:{
       symbol:       sym,
       name:         sym,
@@ -1155,6 +1163,17 @@ app.get('/api/crypto/:coin', async (req,res) => {
       regimeDesc:         regime.regimeDesc,
       regimeBias:         regime.regimeBias,
       ret30:              regime.ret30,
+      // Real costs (slippage + fees — AlgoTest 5% rule)
+      costs:{
+        totalCostPct:  TOTAL_COST_PCT,
+        breakEvenMove: TOTAL_COST_PCT,
+        realEntry,
+        realTarget10,
+        realTarget25,
+        realStopLoss,
+        netProfit10pct,
+        note: 'CoinDCX fee 0.2%+0.2% + slippage 0.5%+0.5% = 1.4% per round trip',
+      },
       // Patterns & Indicators
       patterns,
       indicators:{
@@ -1204,6 +1223,203 @@ app.get('/api/news/:query', async (req,res) => {
 });
 
 app.listen(PORT, () => console.log(`✅ Crypto API (CoinDCX) running on port ${PORT}`));
+
+// ── Funding Rate Monitor ─────────────────────────────────────────────────────
+// Fetches perpetual funding rates from CoinDCX Futures
+// High positive rate → buy spot + short futures = collect free funding
+app.get('/api/crypto/funding', async (req,res) => {
+  try{
+    // CoinDCX futures ticker
+    const r = await axios.get('https://api.coindcx.com/exchange/ticker', {headers:H, timeout:10000});
+    const tickers = r.data || [];
+
+    // Filter perpetual futures markets (end in PERP or contain PERP)
+    const futuresTickers = tickers.filter(t =>
+      t.market && (t.market.includes('PERP') || t.market.includes('_USDT'))
+    );
+
+    // Get funding rates from CoinDCX futures API
+    let fundingRates = [];
+    try{
+      const fr = await axios.get('https://api.coindcx.com/exchange/v1/derivatives/futures/data/funding_rate',
+        {headers:H, timeout:10000});
+      fundingRates = fr.data || [];
+    }catch(e){
+      console.log('Funding rate API error:', e.message);
+    }
+
+    // Build funding rate map
+    const rateMap = {};
+    fundingRates.forEach(f => {
+      if(f.symbol && f.funding_rate){
+        rateMap[f.symbol] = parseFloat(f.funding_rate);
+      }
+    });
+
+    // Calculate annualised rates and opportunities
+    const opportunities = Object.entries(rateMap)
+      .map(([sym, rate]) => {
+        const rate8h   = rate * 100;           // % per 8 hours
+        const rateDay  = rate8h * 3;           // % per day (3 funding periods)
+        const rateYear = rateDay * 365;        // % annualised
+
+        let strategy = '';
+        let risk = '';
+        if(rate8h > 0.05){
+          strategy = 'BUY SPOT + SHORT FUTURES';
+          risk = 'Low — price-neutral, collect funding';
+        } else if(rate8h < -0.05){
+          strategy = 'SELL SPOT + LONG FUTURES';
+          risk = 'Low — price-neutral, collect negative funding';
+        } else {
+          strategy = 'NEUTRAL — too low to arb';
+          risk = 'Skip';
+        }
+
+        return {
+          symbol:    sym,
+          rate8h:    parseFloat(rate8h.toFixed(4)),
+          rateDay:   parseFloat(rateDay.toFixed(3)),
+          rateYear:  parseFloat(rateYear.toFixed(1)),
+          strategy,
+          risk,
+          worthIt:   Math.abs(rate8h) > 0.05,
+        };
+      })
+      .filter(o => o.worthIt)
+      .sort((a,b) => Math.abs(b.rate8h) - Math.abs(a.rate8h));
+
+    res.json({
+      success: true,
+      opportunities,
+      total: opportunities.length,
+      explanation: 'Funding rate arbitrage: buy spot + short futures when rate is positive. You collect funding every 8 hours with near-zero directional risk.',
+      minRateToArb: '0.05% per 8 hours (0.15%/day, ~55%/year)',
+    });
+  }catch(e){
+    console.log('Funding rate error:', e.message);
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+// ── Paper Trading Engine ──────────────────────────────────────────────────────
+// Records signals and tracks outcomes — forward testing without real money
+let paperTrades = [];
+
+app.post('/api/paper/record', async (req,res) => {
+  try{
+    const {symbol, entryPrice, targetPct, stopLossPct, signal, confidence, regime} = req.body;
+    const trade = {
+      id:          Date.now(),
+      symbol,
+      entryPrice:  parseFloat(entryPrice),
+      targetPrice: parseFloat((entryPrice*(1+targetPct/100)).toFixed(8)),
+      stopPrice:   parseFloat((entryPrice*(1-stopLossPct/100)).toFixed(8)),
+      targetPct:   parseFloat(targetPct),
+      stopLossPct: parseFloat(stopLossPct),
+      signal,
+      confidence,
+      regime,
+      entryTime:   new Date().toISOString(),
+      status:      'OPEN',
+      outcome:     null,
+      exitPrice:   null,
+      exitTime:    null,
+      pnlPct:      null,
+    };
+    paperTrades.push(trade);
+    res.json({success:true, trade, totalTrades:paperTrades.length});
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+app.get('/api/paper/update', async (req,res) => {
+  try{
+    const openTrades = paperTrades.filter(t => t.status==='OPEN');
+    let updated = 0;
+
+    for(const trade of openTrades){
+      try{
+        const r = await axios.get(`https://api.coindcx.com/exchange/ticker`, {headers:H, timeout:8000});
+        const tickers = r.data || [];
+        const sym = trade.symbol;
+        await loadAllPairs();
+        const tickerKey = ALL_INR_PAIRS[sym]?.ticker;
+        const t = tickers.find(t => t.market === tickerKey);
+        if(!t) continue;
+
+        const currentPrice = parseFloat(t.last_price||0);
+        const pnlPct = ((currentPrice-trade.entryPrice)/trade.entryPrice*100);
+
+        if(currentPrice >= trade.targetPrice){
+          trade.status   = 'CLOSED';
+          trade.outcome  = 'WIN';
+          trade.exitPrice = currentPrice;
+          trade.exitTime  = new Date().toISOString();
+          trade.pnlPct   = parseFloat(pnlPct.toFixed(2));
+          updated++;
+        } else if(currentPrice <= trade.stopPrice){
+          trade.status   = 'CLOSED';
+          trade.outcome  = 'LOSS';
+          trade.exitPrice = currentPrice;
+          trade.exitTime  = new Date().toISOString();
+          trade.pnlPct   = parseFloat(pnlPct.toFixed(2));
+          updated++;
+        } else {
+          trade.currentPrice = currentPrice;
+          trade.currentPnl   = parseFloat(pnlPct.toFixed(2));
+        }
+      }catch(e){ continue; }
+    }
+
+    const closed  = paperTrades.filter(t=>t.status==='CLOSED');
+    const wins    = closed.filter(t=>t.outcome==='WIN').length;
+    const losses  = closed.filter(t=>t.outcome==='LOSS').length;
+    const winRate = closed.length > 0 ? ((wins/closed.length)*100).toFixed(1) : 'N/A';
+
+    res.json({
+      success:true, updated,
+      stats:{
+        totalTrades:  paperTrades.length,
+        open:         openTrades.length,
+        closed:       closed.length,
+        wins, losses,
+        winRate:      winRate+'%',
+        avgPnl:       closed.length > 0 ? (closed.reduce((s,t)=>s+(t.pnlPct||0),0)/closed.length).toFixed(2)+'%' : 'N/A',
+      },
+      trades: paperTrades.slice(-20),
+    });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+app.get('/api/paper/stats', (req,res) => {
+  const closed  = paperTrades.filter(t=>t.status==='CLOSED');
+  const wins    = closed.filter(t=>t.outcome==='WIN').length;
+  const losses  = closed.filter(t=>t.outcome==='LOSS').length;
+  const winRate = closed.length > 0 ? ((wins/closed.length)*100).toFixed(1) : 'N/A';
+  const avgPnl  = closed.length > 0 ? (closed.reduce((s,t)=>s+(t.pnlPct||0),0)/closed.length).toFixed(2) : 'N/A';
+  const profitFactor = losses > 0 ?
+    (closed.filter(t=>t.outcome==='WIN').reduce((s,t)=>s+(t.pnlPct||0),0) /
+     Math.abs(closed.filter(t=>t.outcome==='LOSS').reduce((s,t)=>s+(t.pnlPct||0),0))).toFixed(2) : 'N/A';
+
+  res.json({
+    success:true,
+    stats:{
+      totalTrades:paperTrades.length, open:paperTrades.filter(t=>t.status==='OPEN').length,
+      closed:closed.length, wins, losses, winRate:winRate+'%',
+      avgPnl:avgPnl+'%', profitFactor,
+      trades:paperTrades,
+    },
+  });
+});
+
+app.delete('/api/paper/reset', (req,res) => {
+  paperTrades = [];
+  res.json({success:true, message:'Paper trades reset'});
+});
 
 // ─── CoinDCX Auto Trading Bot ─────────────────────────────────────────────────
 const crypto = require('crypto');
