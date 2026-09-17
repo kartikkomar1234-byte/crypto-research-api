@@ -1421,6 +1421,109 @@ app.delete('/api/paper/reset', (req,res) => {
   res.json({success:true, message:'Paper trades reset'});
 });
 
+// ─── Server-Side Trade Monitor (24/7 — no browser needed) ───────────────────
+let serverTrades = [];
+let monitorRunning = false;
+
+// Add trade to server monitor
+app.post('/api/monitor/add', (req,res) => {
+  const {symbol, buyPrice, quantity, stopLoss, target} = req.body;
+  // Remove existing trade for same symbol
+  serverTrades = serverTrades.filter(t => t.symbol !== symbol);
+  serverTrades.push({
+    symbol, buyPrice:parseFloat(buyPrice),
+    quantity:parseFloat(quantity),
+    stopLoss:parseFloat(stopLoss),
+    target:parseFloat(target),
+    addedAt: new Date().toISOString(),
+    status:'ACTIVE',
+    lastPrice:null, lastPct:null,
+  });
+  console.log(`✅ Server monitor added: ${symbol} buy:${buyPrice} sl:${stopLoss} tgt:${target}`);
+  if(!monitorRunning) startServerMonitor();
+  res.json({success:true, trades:serverTrades});
+});
+
+// Get monitor status
+app.get('/api/monitor/status', (req,res) => {
+  res.json({success:true, trades:serverTrades, running:monitorRunning});
+});
+
+// Remove trade from monitor
+app.post('/api/monitor/remove', (req,res) => {
+  const {symbol} = req.body;
+  serverTrades = serverTrades.filter(t => t.symbol !== symbol);
+  res.json({success:true, trades:serverTrades});
+});
+
+// Server-side price checking
+async function checkServerTrades(){
+  if(!serverTrades.length) return;
+  const tickers = await getTicker().catch(()=>null);
+  if(!tickers) return;
+
+  await loadAllPairs();
+
+  for(const trade of serverTrades){
+    if(trade.status !== 'ACTIVE') continue;
+    try{
+      const pair = ALL_INR_PAIRS[trade.symbol];
+      if(!pair) continue;
+      const t = tickers[pair.ticker];
+      if(!t) continue;
+
+      const price = parseFloat(t.last_price||0);
+      const pct = ((price-trade.buyPrice)/trade.buyPrice*100);
+      const pl = ((price-trade.buyPrice)*trade.quantity).toFixed(0);
+
+      trade.lastPrice = price;
+      trade.lastPct = parseFloat(pct.toFixed(2));
+      trade.lastPL = parseFloat(pl);
+      trade.lastCheck = new Date().toISOString();
+
+      console.log(`[Monitor] ${trade.symbol}: ₹${price} | ${pct.toFixed(2)}% | P&L:₹${pl}`);
+
+      // Auto sell on target or stop loss
+      if(pct >= 10 || price <= trade.stopLoss){
+        const reason = pct >= 10 ? `TARGET HIT +${pct.toFixed(2)}%` : `STOP LOSS ${pct.toFixed(2)}%`;
+        console.log(`🚨 ${reason} — AUTO SELLING ${trade.symbol}!`);
+
+        trade.status = 'SELLING';
+        const sellPrice = parseFloat((price*0.999).toFixed(4));
+
+        try{
+          const sellBody = {
+            side:'sell', order_type:'limit_order',
+            market:`${trade.symbol}INR`,
+            price_per_unit:sellPrice,
+            total_quantity:trade.quantity,
+            timestamp:Date.now(),
+          };
+          const result = await dcxPost('/exchange/v1/orders/create', sellBody);
+          trade.status = 'SOLD';
+          trade.soldAt = price;
+          trade.soldReason = reason;
+          trade.soldAt_time = new Date().toISOString();
+          console.log(`✅ SOLD ${trade.symbol} at ₹${sellPrice} — ${reason}`);
+        }catch(e){
+          trade.status = 'ACTIVE'; // retry next cycle
+          console.log(`❌ Sell failed for ${trade.symbol}:`, e.message);
+        }
+      }
+    }catch(e){
+      console.log(`Monitor error for ${trade.symbol}:`, e.message);
+    }
+  }
+}
+
+function startServerMonitor(){
+  if(monitorRunning) return;
+  monitorRunning = true;
+  console.log('🤖 Server-side trade monitor STARTED — checking every 30 seconds');
+  setInterval(checkServerTrades, 30000);
+  checkServerTrades(); // run immediately
+}
+
 // ─── CoinDCX Auto Trading Bot ─────────────────────────────────────────────────
 const crypto = require('crypto');
 
@@ -1451,6 +1554,71 @@ app.get('/api/bot/balance', async (req,res) => {
     const data = await dcxPost('/exchange/v1/users/balances', body);
     res.json({ success:true, balances: data });
   }catch(e){ res.status(500).json({ success:false, error:e.message }); }
+});
+
+// Check minimum order before placing
+app.post('/api/bot/check', async (req,res) => {
+  try{
+    const { symbol, amountINR } = req.body;
+    await loadAllPairs();
+
+    // Get current price
+    const tickers = await getTicker();
+    const pair = ALL_INR_PAIRS[symbol];
+    if(!pair) return res.json({success:false, error:`${symbol} not found`});
+
+    const t = tickers[pair.ticker];
+    const price = parseFloat(t?.last_price||0);
+    if(!price) return res.json({success:false, error:'Could not get price'});
+
+    // CoinDCX minimums
+    const MIN_ORDER_INR = 100; // minimum ₹100 order value
+    // Some coins have minimum quantity (e.g. ZEC min 0.01)
+    // We detect this by checking if amountINR/price < known minimums
+    const rawQty = amountINR / price;
+
+    // Precision rules by price range
+    let qty, precision;
+    if(price > 10000){
+      precision = 4;
+      qty = parseFloat(rawQty.toFixed(4));
+      // Check minimum (e.g. ZEC needs 0.01 min)
+      if(qty < 0.01) qty = 0.01;
+    } else if(price > 100){
+      precision = 2;
+      qty = parseFloat(rawQty.toFixed(2));
+      if(qty < 0.1) qty = 0.1;
+    } else if(price > 1){
+      precision = 1;
+      qty = parseFloat(rawQty.toFixed(1));
+      if(qty < 1) qty = 1;
+    } else {
+      precision = 0;
+      qty = Math.floor(rawQty);
+      if(qty < 1) qty = 1;
+    }
+
+    const actualTotal = parseFloat((price * qty).toFixed(2));
+    const requestedTotal = parseFloat(amountINR);
+    const difference = actualTotal - requestedTotal;
+    const needsConfirmation = difference > 10; // more than ₹10 difference
+
+    res.json({
+      success: true,
+      symbol,
+      price,
+      requestedAmount: requestedTotal,
+      actualAmount: actualTotal,
+      quantity: qty,
+      difference: parseFloat(difference.toFixed(2)),
+      needsConfirmation,
+      message: needsConfirmation
+        ? `⚠️ Minimum order for ${symbol} is ₹${actualTotal} (you asked ₹${requestedTotal}). Shall I proceed with ₹${actualTotal}?`
+        : `✅ Order ready: ${qty} ${symbol} at ₹${price} = ₹${actualTotal}`
+    });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
 });
 
 // Place a buy order
