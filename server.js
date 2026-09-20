@@ -1224,6 +1224,100 @@ app.get('/api/news/:query', async (req,res) => {
 
 app.listen(PORT, () => console.log(`✅ Crypto API (CoinDCX) running on port ${PORT}`));
 
+// ── Top Gainers Tracker + Pattern Analyser ───────────────────────────────────
+// Records daily top gainers and finds patterns over time
+
+let topGainersHistory = []; // stores daily snapshots
+
+app.get('/api/gainers/today', async (req,res) => {
+  try{
+    const [tickers] = await Promise.all([getTicker(), loadAllPairs()]);
+    const ALL = Object.keys(ALL_INR_PAIRS);
+
+    const coins = ALL.map(sym => {
+      const t = tickers[ALL_INR_PAIRS[sym].ticker];
+      if(!t) return null;
+      const price   = parseFloat(t.last_price||0);
+      const change  = parseFloat(t.change_24_hour||0);
+      const high24h = parseFloat(t.high||0);
+      const low24h  = parseFloat(t.low||0);
+      const volume  = parseFloat(t.volume||0);
+      if(!price || !change) return null;
+      return { sym, price, change, high24h, low24h, volume,
+        range: low24h>0 ? parseFloat(((high24h-low24h)/low24h*100).toFixed(2)) : 0 };
+    }).filter(Boolean);
+
+    // Top 20 gainers
+    const gainers = coins.sort((a,b)=>b.change-a.change).slice(0,20);
+
+    // Record today's snapshot
+    const today = new Date().toISOString().split('T')[0];
+    const existing = topGainersHistory.find(h=>h.date===today);
+    if(!existing){
+      topGainersHistory.push({
+        date: today,
+        timestamp: new Date().toISOString(),
+        gainers: gainers.map(g=>({
+          sym:g.sym, change:g.change, price:g.price,
+          volume:g.volume, range:g.range
+        }))
+      });
+      // Keep last 30 days
+      if(topGainersHistory.length > 30) topGainersHistory.shift();
+    }
+
+    res.json({ success:true, date:today, gainers, total:gainers.length });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+// Get historical top gainers + pattern analysis
+app.get('/api/gainers/history', async (req,res) => {
+  try{
+    // Pattern analysis across all recorded days
+    const coinFrequency = {}; // how many times each coin appeared in top gainers
+    const coinAvgGain   = {}; // average gain when it appeared
+    const coinMaxGain   = {}; // max gain seen
+
+    topGainersHistory.forEach(day => {
+      day.gainers.forEach(g => {
+        if(!coinFrequency[g.sym]){ coinFrequency[g.sym]=0; coinAvgGain[g.sym]=[]; coinMaxGain[g.sym]=0; }
+        coinFrequency[g.sym]++;
+        coinAvgGain[g.sym].push(g.change);
+        if(g.change > coinMaxGain[g.sym]) coinMaxGain[g.sym] = g.change;
+      });
+    });
+
+    // Build pattern report
+    const patterns = Object.keys(coinFrequency)
+      .map(sym => ({
+        sym,
+        daysInTopGainers: coinFrequency[sym],
+        avgGain: parseFloat((coinAvgGain[sym].reduce((a,b)=>a+b,0)/coinAvgGain[sym].length).toFixed(2)),
+        maxGain: parseFloat(coinMaxGain[sym].toFixed(2)),
+        consistency: parseFloat((coinFrequency[sym]/topGainersHistory.length*100).toFixed(1))+'%',
+      }))
+      .sort((a,b)=>b.daysInTopGainers-a.daysInTopGainers);
+
+    // Identify recurring pumpers (appeared 2+ days)
+    const recurringPumpers = patterns.filter(p=>p.daysInTopGainers>=2);
+
+    res.json({
+      success: true,
+      daysTracked: topGainersHistory.length,
+      history: topGainersHistory,
+      patterns,
+      recurringPumpers,
+      insight: recurringPumpers.length > 0
+        ? `${recurringPumpers.length} coins appeared in top gainers multiple times — these may have ongoing catalysts`
+        : 'Not enough data yet — keep scanning daily for 14 days',
+    });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
 // ── Funding Rate Monitor ─────────────────────────────────────────────────────
 // Fetches perpetual funding rates from CoinDCX Futures
 // High positive rate → buy spot + short futures = collect free funding
