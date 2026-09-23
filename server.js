@@ -1,6 +1,10 @@
 const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
+const axios   = require('axios');
+const cors    = require('cors');
+const { MongoClient } = require('mongodb');
+
+// Common headers for API calls
+const H = {'User-Agent':'Mozilla/5.0 Chrome/120', 'Accept':'application/json'};
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -387,7 +391,6 @@ function detectRegime(candles, rsi, change24h){
 }
 
 // ── CoinDCX API calls ──────────────────────────────────────────────────────────
-const H = {'User-Agent':'Mozilla/5.0 Chrome/120', 'Accept':'application/json'};
 
 async function getTicker(){
   const cached = getCache('ticker');
@@ -1498,7 +1501,6 @@ app.get('/api/crypto/funding', async (req,res) => {
 });
 
 // ── MongoDB Persistent Storage ───────────────────────────────────────────────
-const { MongoClient } = require('mongodb');
 const MONGO_URI = 'mongodb+srv://kartik:crypto123@cluster0.48etiqz.mongodb.net/?appName=Cluster0';
 const MONGO_DB  = 'cryptoResearch';
 
