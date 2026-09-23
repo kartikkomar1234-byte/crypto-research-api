@@ -1227,7 +1227,7 @@ app.listen(PORT, () => console.log(`✅ Crypto API (CoinDCX) running on port ${P
 // ── Top Gainers Tracker + Pattern Analyser ───────────────────────────────────
 // Records daily top gainers and finds patterns over time
 
-let topGainersHistory = []; // stores daily snapshots
+let topGainersHistory = loadGainersHistory(); // load from disk on startup
 
 app.get('/api/gainers/today', async (req,res) => {
   try{
@@ -1264,6 +1264,7 @@ app.get('/api/gainers/today', async (req,res) => {
       });
       // Keep last 30 days
       if(topGainersHistory.length > 30) topGainersHistory.shift();
+      saveGainersHistory(topGainersHistory); // persist to disk
     }
 
     res.json({ success:true, date:today, gainers, total:gainers.length });
@@ -1396,9 +1397,56 @@ app.get('/api/crypto/funding', async (req,res) => {
   }
 });
 
+// ── Persistent Storage ───────────────────────────────────────────────────────
+const fs = require('fs');
+const DATA_DIR = './data';
+const PAPER_FILE = `${DATA_DIR}/paper_trades.json`;
+const GAINERS_FILE = `${DATA_DIR}/gainers_history.json`;
+
+// Ensure data directory exists
+if(!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, {recursive:true});
+
+// Load paper trades from disk
+function loadPaperTrades(){
+  try{
+    if(fs.existsSync(PAPER_FILE)){
+      const d = JSON.parse(fs.readFileSync(PAPER_FILE,'utf8'));
+      console.log(`✅ Loaded ${d.length} paper trades from disk`);
+      return d;
+    }
+  }catch(e){ console.log('Paper trades load error:', e.message); }
+  return [];
+}
+
+// Save paper trades to disk
+function savePaperTrades(trades){
+  try{
+    fs.writeFileSync(PAPER_FILE, JSON.stringify(trades, null, 2));
+  }catch(e){ console.log('Paper trades save error:', e.message); }
+}
+
+// Load gainers history from disk
+function loadGainersHistory(){
+  try{
+    if(fs.existsSync(GAINERS_FILE)){
+      const d = JSON.parse(fs.readFileSync(GAINERS_FILE,'utf8'));
+      console.log(`✅ Loaded ${d.length} days of gainers history from disk`);
+      return d;
+    }
+  }catch(e){ console.log('Gainers load error:', e.message); }
+  return [];
+}
+
+// Save gainers history to disk
+function saveGainersHistory(history){
+  try{
+    fs.writeFileSync(GAINERS_FILE, JSON.stringify(history, null, 2));
+  }catch(e){ console.log('Gainers save error:', e.message); }
+}
+
 // ── Paper Trading Engine ──────────────────────────────────────────────────────
 // Records signals and tracks outcomes — forward testing without real money
-let paperTrades = [];
+let paperTrades = loadPaperTrades();
 
 app.post('/api/paper/record', async (req,res) => {
   try{
@@ -1422,6 +1470,7 @@ app.post('/api/paper/record', async (req,res) => {
       pnlPct:      null,
     };
     paperTrades.push(trade);
+    savePaperTrades(paperTrades); // persist to disk
     res.json({success:true, trade, totalTrades:paperTrades.length});
   }catch(e){
     res.status(500).json({success:false, error:e.message});
@@ -1472,6 +1521,7 @@ app.get('/api/paper/update', async (req,res) => {
     const losses  = closed.filter(t=>t.outcome==='LOSS').length;
     const winRate = closed.length > 0 ? ((wins/closed.length)*100).toFixed(1) : 'N/A';
 
+    if(updated > 0) savePaperTrades(paperTrades); // save outcomes to disk
     res.json({
       success:true, updated,
       stats:{
@@ -1512,6 +1562,7 @@ app.get('/api/paper/stats', (req,res) => {
 
 app.delete('/api/paper/reset', (req,res) => {
   paperTrades = [];
+  savePaperTrades(paperTrades);
   res.json({success:true, message:'Paper trades reset'});
 });
 
