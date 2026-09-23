@@ -1222,12 +1222,20 @@ app.get('/api/news/:query', async (req,res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Crypto API (CoinDCX) running on port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`✅ Crypto API (CoinDCX) running on port ${PORT}`);
+  // Load persistent data from MongoDB on startup
+  try{
+    paperTrades = await loadPaperTrades();
+    topGainersHistory = await loadGainersHistory();
+    console.log(`✅ MongoDB: ${paperTrades.length} paper trades + ${topGainersHistory.length} gainer days loaded`);
+  }catch(e){ console.log('MongoDB startup error:', e.message); }
+});
 
 // ── Top Gainers Tracker + Pattern Analyser ───────────────────────────────────
 // Records daily top gainers and finds patterns over time
 
-let topGainersHistory = loadGainersHistory(); // load from disk on startup
+let topGainersHistory = []; // will load from MongoDB on first request
 
 app.get('/api/gainers/today', async (req,res) => {
   try{
@@ -1264,10 +1272,102 @@ app.get('/api/gainers/today', async (req,res) => {
       });
       // Keep last 30 days
       if(topGainersHistory.length > 30) topGainersHistory.shift();
-      saveGainersHistory(topGainersHistory); // persist to disk
+      await saveGainersHistory(topGainersHistory); // persist to MongoDB
     }
 
     res.json({ success:true, date:today, gainers, total:gainers.length });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+// ── Momentum Alert Engine ────────────────────────────────────────────────────
+// Finds coins that appeared in top gainers 2+ days in a row
+app.get('/api/gainers/momentum', async (req,res) => {
+  try{
+    const history = topGainersHistory;
+    if(history.length < 2) return res.json({success:true, alerts:[], message:'Need at least 2 days of data'});
+
+    // Get last 3 days
+    const recent = history.slice(-3);
+    const today = recent[recent.length-1];
+    const yesterday = recent[recent.length-2];
+    const dayBefore = recent.length >= 3 ? recent[recent.length-3] : null;
+
+    // Find coins in today AND yesterday
+    const todaySyms = new Set(today.gainers.map(g=>g.sym));
+    const yestSyms  = new Set(yesterday.gainers.map(g=>g.sym));
+
+    const alerts = [];
+
+    todaySyms.forEach(sym => {
+      if(!yestSyms.has(sym)) return;
+
+      const todayData  = today.gainers.find(g=>g.sym===sym);
+      const yestData   = yesterday.gainers.find(g=>g.sym===sym);
+      const day3Data   = dayBefore ? dayBefore.gainers.find(g=>g.sym===sym) : null;
+
+      const daysInRow  = day3Data ? 3 : 2;
+      const avgGain    = day3Data
+        ? (todayData.change+yestData.change+day3Data.change)/3
+        : (todayData.change+yestData.change)/2;
+
+      // Momentum strength
+      let strength = 'MODERATE';
+      let emoji = '⭐';
+      if(daysInRow >= 3 && todayData.volume > 500000){ strength='VERY STRONG'; emoji='🔥🔥🔥'; }
+      else if(daysInRow >= 2 && todayData.volume > 500000){ strength='STRONG'; emoji='🔥🔥'; }
+      else if(daysInRow >= 2){ strength='MODERATE'; emoji='⭐'; }
+
+      // Is Day 2 gaining more than Day 1? (accelerating momentum)
+      const accelerating = todayData.change > yestData.change;
+
+      alerts.push({
+        sym,
+        daysInRow,
+        strength,
+        emoji,
+        accelerating,
+        todayGain:   parseFloat(todayData.change.toFixed(2)),
+        yestGain:    parseFloat(yestData.change.toFixed(2)),
+        day3Gain:    day3Data ? parseFloat(day3Data.change.toFixed(2)) : null,
+        avgGain:     parseFloat(avgGain.toFixed(2)),
+        currentPrice: todayData.price,
+        volume:      todayData.volume,
+        volStr:      todayData.volume>100000 ? '₹'+(todayData.volume/100000).toFixed(1)+'L' : '₹'+(todayData.volume/1000).toFixed(0)+'K',
+        // Trade plan
+        target10:    parseFloat((todayData.price*1.10).toFixed(6)),
+        target20:    parseFloat((todayData.price*1.20).toFixed(6)),
+        stopLoss:    parseFloat((todayData.price*0.92).toFixed(6)),
+        // Buy signal quality
+        buySignal: todayData.volume > 500000 && todayData.change > 10
+          ? 'STRONG BUY — High volume + strong momentum'
+          : todayData.volume > 100000
+          ? 'BUY — Decent volume momentum'
+          : 'WEAK — Low volume, risky',
+        strategy: `Day ${daysInRow} of momentum. ${accelerating?'Accelerating ▲ — strong signal!':'Slowing ▼ — may be peaking.'}`,
+        warning: daysInRow >= 3
+          ? '⚠️ Day 3 — momentum may peak soon. Sell at 10% quickly!'
+          : accelerating
+          ? '✅ Still accelerating — good entry window'
+          : '⚠️ Momentum slowing — be careful',
+      });
+    });
+
+    // Sort by strength
+    const order = {'VERY STRONG':0,'STRONG':1,'MODERATE':2};
+    alerts.sort((a,b)=>(order[a.strength]||3)-(order[b.strength]||3));
+
+    res.json({
+      success:true,
+      date:today.date,
+      daysTracked:history.length,
+      alerts,
+      total:alerts.length,
+      message: alerts.length > 0
+        ? `${alerts.length} momentum alert${alerts.length>1?'s':''} found!`
+        : 'No recurring gainers today — all pumps are new',
+    });
   }catch(e){
     res.status(500).json({success:false, error:e.message});
   }
@@ -1397,56 +1497,75 @@ app.get('/api/crypto/funding', async (req,res) => {
   }
 });
 
-// ── Persistent Storage ───────────────────────────────────────────────────────
-const fs = require('fs');
-const DATA_DIR = './data';
-const PAPER_FILE = `${DATA_DIR}/paper_trades.json`;
-const GAINERS_FILE = `${DATA_DIR}/gainers_history.json`;
+// ── MongoDB Persistent Storage ───────────────────────────────────────────────
+const { MongoClient } = require('mongodb');
+const MONGO_URI = 'mongodb+srv://kartik:crypto123@cluster0.48etiqz.mongodb.net/?appName=Cluster0';
+const MONGO_DB  = 'cryptoResearch';
 
-// Ensure data directory exists
-if(!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, {recursive:true});
+let mongoClient = null;
+let db = null;
 
-// Load paper trades from disk
-function loadPaperTrades(){
+async function connectMongo(){
   try{
-    if(fs.existsSync(PAPER_FILE)){
-      const d = JSON.parse(fs.readFileSync(PAPER_FILE,'utf8'));
-      console.log(`✅ Loaded ${d.length} paper trades from disk`);
-      return d;
-    }
-  }catch(e){ console.log('Paper trades load error:', e.message); }
-  return [];
+    if(db) return db;
+    mongoClient = new MongoClient(MONGO_URI);
+    await mongoClient.connect();
+    db = mongoClient.db(MONGO_DB);
+    console.log('✅ MongoDB connected!');
+    return db;
+  }catch(e){
+    console.log('❌ MongoDB connection error:', e.message);
+    return null;
+  }
 }
 
-// Save paper trades to disk
-function savePaperTrades(trades){
+// Load paper trades from MongoDB
+async function loadPaperTrades(){
   try{
-    fs.writeFileSync(PAPER_FILE, JSON.stringify(trades, null, 2));
-  }catch(e){ console.log('Paper trades save error:', e.message); }
+    const db = await connectMongo();
+    if(!db) return [];
+    const trades = await db.collection('paperTrades').find({}).toArray();
+    console.log(`✅ Loaded ${trades.length} paper trades from MongoDB`);
+    return trades;
+  }catch(e){ console.log('Load paper trades error:', e.message); return []; }
 }
 
-// Load gainers history from disk
-function loadGainersHistory(){
+// Save paper trades to MongoDB
+async function savePaperTrades(trades){
   try{
-    if(fs.existsSync(GAINERS_FILE)){
-      const d = JSON.parse(fs.readFileSync(GAINERS_FILE,'utf8'));
-      console.log(`✅ Loaded ${d.length} days of gainers history from disk`);
-      return d;
-    }
-  }catch(e){ console.log('Gainers load error:', e.message); }
-  return [];
+    const db = await connectMongo();
+    if(!db) return;
+    const col = db.collection('paperTrades');
+    await col.deleteMany({});
+    if(trades.length > 0) await col.insertMany(trades);
+  }catch(e){ console.log('Save paper trades error:', e.message); }
 }
 
-// Save gainers history to disk
-function saveGainersHistory(history){
+// Load gainers history from MongoDB
+async function loadGainersHistory(){
   try{
-    fs.writeFileSync(GAINERS_FILE, JSON.stringify(history, null, 2));
-  }catch(e){ console.log('Gainers save error:', e.message); }
+    const db = await connectMongo();
+    if(!db) return [];
+    const history = await db.collection('gainersHistory').find({}).sort({date:1}).toArray();
+    console.log(`✅ Loaded ${history.length} days of gainers from MongoDB`);
+    return history;
+  }catch(e){ console.log('Load gainers error:', e.message); return []; }
+}
+
+// Save gainers history to MongoDB
+async function saveGainersHistory(history){
+  try{
+    const db = await connectMongo();
+    if(!db) return;
+    const col = db.collection('gainersHistory');
+    await col.deleteMany({});
+    if(history.length > 0) await col.insertMany(history);
+  }catch(e){ console.log('Save gainers error:', e.message); }
 }
 
 // ── Paper Trading Engine ──────────────────────────────────────────────────────
 // Records signals and tracks outcomes — forward testing without real money
-let paperTrades = loadPaperTrades();
+let paperTrades = []; // will load from MongoDB on first request
 
 app.post('/api/paper/record', async (req,res) => {
   try{
@@ -1470,7 +1589,7 @@ app.post('/api/paper/record', async (req,res) => {
       pnlPct:      null,
     };
     paperTrades.push(trade);
-    savePaperTrades(paperTrades); // persist to disk
+    await savePaperTrades(paperTrades); // persist to MongoDB
     res.json({success:true, trade, totalTrades:paperTrades.length});
   }catch(e){
     res.status(500).json({success:false, error:e.message});
@@ -1521,7 +1640,7 @@ app.get('/api/paper/update', async (req,res) => {
     const losses  = closed.filter(t=>t.outcome==='LOSS').length;
     const winRate = closed.length > 0 ? ((wins/closed.length)*100).toFixed(1) : 'N/A';
 
-    if(updated > 0) savePaperTrades(paperTrades); // save outcomes to disk
+    if(updated > 0) await savePaperTrades(paperTrades); // save outcomes to MongoDB
     res.json({
       success:true, updated,
       stats:{
@@ -1560,9 +1679,9 @@ app.get('/api/paper/stats', (req,res) => {
   });
 });
 
-app.delete('/api/paper/reset', (req,res) => {
+app.delete('/api/paper/reset', async (req,res) => {
   paperTrades = [];
-  savePaperTrades(paperTrades);
+  await savePaperTrades(paperTrades);
   res.json({success:true, message:'Paper trades reset'});
 });
 
