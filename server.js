@@ -1376,6 +1376,23 @@ app.get('/api/gainers/momentum', async (req,res) => {
   }
 });
 
+// Manual insert for historical data
+app.post('/api/gainers/insert', async (req,res) => {
+  try{
+    const {date, gainers} = req.body;
+    if(!date || !gainers) return res.status(400).json({success:false,error:'date and gainers required'});
+    // Check if date already exists
+    const existing = topGainersHistory.find(h=>h.date===date);
+    if(!existing){
+      topGainersHistory.push({date, timestamp:new Date().toISOString(), gainers});
+      topGainersHistory.sort((a,b)=>a.date.localeCompare(b.date));
+      if(topGainersHistory.length > 30) topGainersHistory.shift();
+      await saveGainersHistory(topGainersHistory);
+    }
+    res.json({success:true, date, inserted:!existing, totalDays:topGainersHistory.length});
+  }catch(e){ res.status(500).json({success:false,error:e.message}); }
+});
+
 // Get historical top gainers + pattern analysis
 app.get('/api/gainers/history', async (req,res) => {
   try{
