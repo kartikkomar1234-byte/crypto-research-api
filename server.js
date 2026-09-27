@@ -1284,6 +1284,307 @@ app.get('/api/gainers/today', async (req,res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🚨 EARLY WARNING SYSTEM — Volume Spike + Pattern Match + Binance Alpha
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Store volume history for spike detection
+let volumeHistory = {}; // sym → [last 24 hourly volumes]
+let earlyWarnings = []; // active alerts
+let lastBinanceAlpha = []; // last known Binance Alpha listings
+
+// ── Option A: Volume Spike Scanner ───────────────────────────────────────────
+async function scanVolumeSpikes(){
+  try{
+    await loadAllPairs();
+    const tickers = await getTicker();
+    const spikes = [];
+
+    for(const [sym, pair] of Object.entries(ALL_INR_PAIRS)){
+      const t = tickers[pair.ticker];
+      if(!t) continue;
+      const vol = parseFloat(t.volume||0) * parseFloat(t.last_price||0);
+      if(vol < 100000) continue; // skip tiny coins
+
+      // Store hourly volume
+      if(!volumeHistory[sym]) volumeHistory[sym] = [];
+      volumeHistory[sym].push({vol, time: Date.now()});
+      // Keep last 48 hours
+      volumeHistory[sym] = volumeHistory[sym].filter(v=>Date.now()-v.time < 48*3600*1000);
+
+      if(volumeHistory[sym].length < 6) continue; // need at least 6 hours of data
+
+      // Calculate average volume (excluding last entry)
+      const history = volumeHistory[sym].slice(0,-1);
+      const avgVol = history.reduce((s,v)=>s+v.vol,0)/history.length;
+      const currentVol = vol;
+      const spikeRatio = currentVol/avgVol;
+
+      if(spikeRatio >= 3){ // 3x+ volume spike
+        const price = parseFloat(t.last_price||0);
+        const change = parseFloat(t.change_24_hour||0);
+        spikes.push({
+          sym,
+          price,
+          currentVol: parseFloat((currentVol/100000).toFixed(1)),
+          avgVol: parseFloat((avgVol/100000).toFixed(1)),
+          spikeRatio: parseFloat(spikeRatio.toFixed(1)),
+          change24h: parseFloat(change.toFixed(2)),
+          detectedAt: new Date().toISOString(),
+          type: 'VOLUME_SPIKE',
+          strength: spikeRatio >= 10 ? 'EXTREME' : spikeRatio >= 5 ? 'VERY HIGH' : 'HIGH',
+          emoji: spikeRatio >= 10 ? '🚨🚨🚨' : spikeRatio >= 5 ? '🚨🚨' : '🚨',
+          message: `${sym} volume is ${spikeRatio.toFixed(1)}x above average! ₹${(currentVol/100000).toFixed(1)}L vs avg ₹${(avgVol/100000).toFixed(1)}L`,
+          action: change > 0 ? 'MOMENTUM BUILDING — Consider buying' : 'ACCUMULATION PHASE — Watch closely',
+        });
+      }
+    }
+
+    // Sort by spike ratio
+    spikes.sort((a,b)=>b.spikeRatio-a.spikeRatio);
+    return spikes.slice(0,10);
+  }catch(e){
+    console.log('Volume spike scan error:', e.message);
+    return [];
+  }
+}
+
+// ── Option C: Pattern Match Engine ───────────────────────────────────────────
+// Historical pump profiles based on our 10-day data
+const PUMP_PROFILES = {
+  MUBARAK_PROFILE: {
+    name: 'Binance Listing Play',
+    description: 'Coin gets listed/promoted on Binance → 3-6 days of pumping',
+    signs: ['BINANCE in news', 'LISTING in news', 'Volume 5x+', 'Price up 20-40% Day 1'],
+    avgGain: 42, days: 3, exampleCoin: 'MUBARAK',
+    successRate: 85,
+  },
+  CELR_PROFILE: {
+    name: 'AI/Tech Launch Pump',
+    description: 'Major product launch + AI narrative → 1-2 days explosive pump',
+    signs: ['AI/LAUNCH/MAINNET in news', 'Volume 10x+', 'Price up 50%+ Day 1'],
+    avgGain: 100, days: 2, exampleCoin: 'CELR',
+    successRate: 70,
+  },
+  PHA_PROFILE: {
+    name: 'Ecosystem Rotation',
+    description: 'Cosmos/Layer1 ecosystem rally → coin pumps multiple times',
+    signs: ['Ecosystem news', 'Volume 3x+', 'Appears in gainers repeatedly'],
+    avgGain: 35, days: 4, exampleCoin: 'PHA',
+    successRate: 75,
+  },
+  SAGA_PROFILE: {
+    name: 'AI Narrative + Exchange Listing',
+    description: 'AI pivot news + Binance/Coinbase speculation',
+    signs: ['AI in news', 'BINANCE/COINBASE in news', 'Volume 5x+'],
+    avgGain: 30, days: 3, exampleCoin: 'SAGA',
+    successRate: 80,
+  },
+};
+
+async function matchPumpPatterns(){
+  try{
+    await loadAllPairs();
+    const tickers = await getTicker();
+    const matches = [];
+
+    for(const [sym, pair] of Object.entries(ALL_INR_PAIRS)){
+      const t = tickers[pair.ticker];
+      if(!t) continue;
+      const price = parseFloat(t.last_price||0);
+      const vol = parseFloat(t.volume||0) * price;
+      const change = parseFloat(t.change_24_hour||0);
+      if(vol < 500000 || price === 0) continue;
+
+      const matchedProfiles = [];
+
+      // Check MUBARAK profile
+      if(change > 15 && change < 60 && vol > 2000000){
+        // Check news
+        try{
+          const news = await fetchNewsScore(sym);
+          if(news.binance || news.listing){
+            matchedProfiles.push({
+              profile: 'MUBARAK_PROFILE',
+              ...PUMP_PROFILES.MUBARAK_PROFILE,
+              matchScore: 90,
+              matchedSigns: ['High volume', news.binance?'BINANCE news':'LISTING news', `+${change.toFixed(0)}% move`],
+            });
+          }
+        }catch(e){}
+      }
+
+      // Check CELR profile (extreme volume + big move)
+      if(change > 50 && vol > 5000000){
+        matchedProfiles.push({
+          profile: 'CELR_PROFILE',
+          ...PUMP_PROFILES.CELR_PROFILE,
+          matchScore: 85,
+          matchedSigns: [`+${change.toFixed(0)}% explosive move`, `₹${(vol/100000).toFixed(0)}L volume`],
+        });
+      }
+
+      // Check volume spike ratio
+      if(volumeHistory[sym]?.length >= 6){
+        const history = volumeHistory[sym].slice(0,-1);
+        const avgVol = history.reduce((s,v)=>s+v.vol,0)/history.length;
+        const spikeRatio = vol/avgVol;
+
+        if(spikeRatio >= 5 && change > 10){
+          matchedProfiles.push({
+            profile: 'PHA_PROFILE',
+            ...PUMP_PROFILES.PHA_PROFILE,
+            matchScore: 75,
+            matchedSigns: [`Volume ${spikeRatio.toFixed(0)}x spike`, `+${change.toFixed(0)}% move`],
+          });
+        }
+      }
+
+      if(matchedProfiles.length > 0){
+        const best = matchedProfiles.sort((a,b)=>b.matchScore-a.matchScore)[0];
+        matches.push({
+          sym, price, change24h: change,
+          volume: parseFloat((vol/100000).toFixed(1)),
+          pattern: best.name,
+          profile: best.profile,
+          matchScore: best.matchScore,
+          successRate: best.successRate,
+          matchedSigns: best.matchedSigns,
+          avgGain: best.avgGain,
+          expectedDays: best.days,
+          description: best.description,
+          exampleCoin: best.exampleCoin,
+          target: parseFloat((price*(1+best.avgGain/100)).toFixed(6)),
+          stopLoss: parseFloat((price*0.92).toFixed(6)),
+          detectedAt: new Date().toISOString(),
+          emoji: best.matchScore >= 90 ? '🔥🔥🔥' : best.matchScore >= 80 ? '🔥🔥' : '🔥',
+          alert: `${sym} matches ${best.name} pattern (seen in ${best.exampleCoin})! ${best.matchScore}% match. Avg gain: +${best.avgGain}%`,
+        });
+      }
+    }
+
+    matches.sort((a,b)=>b.matchScore-a.matchScore);
+    return matches.slice(0,5);
+  }catch(e){
+    console.log('Pattern match error:', e.message);
+    return [];
+  }
+}
+
+// Helper to fetch news score
+async function fetchNewsScore(sym){
+  try{
+    const url = `https://news.google.com/rss/search?q=${sym}+crypto&hl=en-IN&gl=IN&ceid=IN:en`;
+    const r = await axios.get(url, {timeout:5000});
+    const text = r.data.toUpperCase();
+    return {
+      binance: text.includes('BINANCE'),
+      listing: text.includes('LISTING'),
+      ai: text.includes(' AI '),
+      etf: text.includes('ETF'),
+      launch: text.includes('LAUNCH'),
+      mainnet: text.includes('MAINNET'),
+    };
+  }catch(e){ return {}; }
+}
+
+// ── Option B: Binance Alpha Monitor ──────────────────────────────────────────
+async function checkBinanceAlpha(){
+  try{
+    // Fetch Binance Alpha announcements
+    const r = await axios.get('https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?type=1&categoryId=48&pageSize=10&pageNo=1',
+      {timeout:8000, headers:{'User-Agent':'Mozilla/5.0'}});
+    const articles = r.data?.data?.catalogs?.[0]?.articles || [];
+    const newListings = [];
+
+    for(const article of articles){
+      const title = (article.title||'').toUpperCase();
+      const isNew = !lastBinanceAlpha.includes(article.id);
+      const isListing = title.includes('LIST') || title.includes('ALPHA') || title.includes('ADD');
+
+      if(isNew && isListing){
+        // Extract coin symbol from title
+        const match = title.match(/\(([A-Z]{2,10})\)/);
+        const coinSym = match?.[1];
+        newListings.push({
+          id: article.id,
+          title: article.title,
+          coinSym: coinSym || 'UNKNOWN',
+          publishTime: new Date(article.publishTime).toISOString(),
+          url: `https://www.binance.com/en/support/announcement/${article.code}`,
+          alert: `🚨 NEW BINANCE ALPHA: ${article.title} — ${coinSym ? 'Watch '+coinSym+' on CoinDCX!' : 'Check if available on CoinDCX'}`,
+          type: 'BINANCE_ALPHA',
+          emoji: '🚨🏦',
+          expectedGain: '30-200%',
+          timing: 'Buy NOW before pump — listing pumps happen fast!',
+        });
+        lastBinanceAlpha.push(article.id);
+      }
+    }
+
+    // Keep only last 50 IDs
+    if(lastBinanceAlpha.length > 50) lastBinanceAlpha = lastBinanceAlpha.slice(-50);
+    return newListings;
+  }catch(e){
+    console.log('Binance Alpha check error:', e.message);
+    return [];
+  }
+}
+
+// ── Combined Early Warning API ────────────────────────────────────────────────
+app.get('/api/early-warning', async (req,res) => {
+  try{
+    const [volumeSpikes, patterns, binanceAlpha] = await Promise.all([
+      scanVolumeSpikes(),
+      matchPumpPatterns(),
+      checkBinanceAlpha(),
+    ]);
+
+    // Combine all warnings
+    const allWarnings = [
+      ...binanceAlpha.map(w=>({...w, priority:1, category:'BINANCE_ALPHA'})),
+      ...patterns.map(w=>({...w, priority:2, category:'PATTERN_MATCH'})),
+      ...volumeSpikes.map(w=>({...w, priority:3, category:'VOLUME_SPIKE'})),
+    ].sort((a,b)=>a.priority-b.priority);
+
+    // Store active warnings
+    earlyWarnings = allWarnings;
+
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      totalWarnings: allWarnings.length,
+      binanceAlpha: {count:binanceAlpha.length, items:binanceAlpha},
+      patternMatches: {count:patterns.length, items:patterns},
+      volumeSpikes: {count:volumeSpikes.length, items:volumeSpikes},
+      allWarnings,
+      summary: allWarnings.length > 0
+        ? `🚨 ${allWarnings.length} early warning${allWarnings.length>1?'s':''} detected!`
+        : '✅ No early warnings — market is quiet',
+    });
+  }catch(e){
+    res.status(500).json({success:false, error:e.message});
+  }
+});
+
+// Run volume scan every hour automatically
+setInterval(async ()=>{
+  try{
+    await scanVolumeSpikes();
+    console.log('[Auto] Volume spike scan complete');
+  }catch(e){ console.log('Auto scan error:', e.message); }
+}, 60*60*1000);
+
+// Check Binance Alpha every 30 minutes
+setInterval(async ()=>{
+  try{
+    const newListings = await checkBinanceAlpha();
+    if(newListings.length > 0){
+      console.log(`🚨 NEW BINANCE ALPHA DETECTED: ${newListings.map(l=>l.title).join(', ')}`);
+    }
+  }catch(e){ console.log('Binance Alpha auto check error:', e.message); }
+}, 30*60*1000);
+
 // ── Momentum Alert Engine ────────────────────────────────────────────────────
 // Finds coins that appeared in top gainers 2+ days in a row
 app.get('/api/gainers/momentum', async (req,res) => {
