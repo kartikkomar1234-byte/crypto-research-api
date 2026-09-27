@@ -544,6 +544,28 @@ function predict24h(change24, high24, low24, price){
 
 // ── Enhanced Signal Engine ───────────────────────────────────────────────────
 
+// Fix 2: Fear & Greed Index
+let fearGreedCache = {value:50, label:'Neutral', ts:0};
+async function getFearGreed(){
+  try{
+    if(Date.now()-fearGreedCache.ts < 3600000 && fearGreedCache.value) return fearGreedCache;
+    const r = await axios.get('https://api.alternative.me/fng/?limit=1',{timeout:5000});
+    const d = r.data?.data?.[0];
+    fearGreedCache = {value:parseInt(d?.value||50), label:d?.value_classification||'Neutral', ts:Date.now()};
+    console.log(`Fear & Greed: ${fearGreedCache.value} (${fearGreedCache.label})`);
+    return fearGreedCache;
+  }catch(e){ return fearGreedCache; }
+}
+
+app.get('/api/market/fear-greed', async (req,res) => {
+  const fg = await getFearGreed();
+  res.json({success:true, value:fg.value, label:fg.label,
+    signal: fg.value<=25?'EXTREME FEAR — avoid new trades':fg.value<=40?'FEAR — reduce position sizes':fg.value<=60?'NEUTRAL — trade normally':fg.value<=75?'GREED — take profits early':'EXTREME GREED — avoid buying',
+    color: fg.value<=25?'#E53935':fg.value<=40?'#FF6F00':fg.value<=60?'#FFB300':fg.value<=75?'#66BB6A':'#00C853',
+    positionSizeMultiplier: fg.value<=25?0.5:fg.value<=40?0.75:fg.value<=60?1.0:fg.value<=75?0.85:0.5,
+  });
+});
+
 // 1. News catalyst detector
 async function getNewsSentiment(sym){
   try{
@@ -553,16 +575,61 @@ async function getNewsSentiment(sym){
       {headers:H, timeout:5000}
     );
     const text = r.data.toLowerCase();
-    const bullishHigh = ['listing','listed','binance','coinbase','partnership','launch','upgrade','mainnet','airdrop','burn','etf'];
-    const bullishMed  = ['buy','rally','surge','pump','gain','bullish','breakout','adoption'];
-    const bearish     = ['hack','exploit','crash','lawsuit','ban','dump','scam','rug'];
     let newsScore = 0;
     const catalysts = [];
-    bullishHigh.forEach(w => { if(text.includes(w)){ newsScore+=20; catalysts.push(`🔥 ${w.toUpperCase()} news detected`); }});
-    bullishMed.forEach(w  => { if(text.includes(w)) newsScore+=8; });
-    bearish.forEach(w     => { if(text.includes(w)){ newsScore-=15; catalysts.push(`⚠️ ${w} in news`); }});
     const articleCount = (r.data.match(/<item>/g)||[]).length;
     if(articleCount > 5) newsScore += 10;
+
+    // Fix 1: Context-aware BINANCE detection (listing vs delisting)
+    const binanceCount = (text.match(/binance/g)||[]).length;
+    if(binanceCount > 0){
+      const hasDelistContext = text.includes('delist') || text.includes('remov') || text.includes('suspend') || text.includes('drops');
+      const hasListContext   = text.includes('listing') || text.includes('listed') || text.includes('adds') || text.includes('support');
+      if(hasDelistContext && !hasListContext){ newsScore-=30; catalysts.push('⛔ BINANCE DELISTING detected'); }
+      else if(hasListContext){ newsScore+=20; catalysts.push('🔥 BINANCE LISTING news detected'); }
+      else { newsScore+=5; catalysts.push('🔥 BINANCE news detected'); }
+    }
+
+    // Positive keywords (context-aware)
+    const positiveWords = {
+      'coinbase':15,'partnership':10,'launch':10,'upgrade':10,'mainnet':10,
+      'airdrop':8,'burn':8,'etf':15,'adoption':10,'integration':8,
+      'rally':5,'surge':5,'bullish':5,'breakout':5,'buy':3,
+    };
+    Object.entries(positiveWords).forEach(([w,pts])=>{
+      if(text.includes(w) && !text.includes(`end ${w}`) && !text.includes(`cancel ${w}`)){
+        newsScore+=pts;
+        if(pts>=10) catalysts.push(`🔥 ${w.toUpperCase()} news detected`);
+      }
+    });
+
+    // Fix 1: Enhanced negative keywords
+    const negativeWords = {
+      'hack':25,'exploit':25,'rug':30,'scam':25,'fraud':25,
+      'delist':30,'delisted':30,'suspended':20,'suspend':20,
+      'ban':20,'banned':20,'lawsuit':20,'fine':15,'penalty':15,
+      'sec charges':30,'shutdown':25,'discontinue':15,'discontinu':15,
+      'remove pair':25,'removes pair':25,'crash':10,'dump':8,
+    };
+    Object.entries(negativeWords).forEach(([w,pts])=>{
+      if(text.includes(w)){
+        newsScore-=pts;
+        catalysts.push(`⛔ ${w.toUpperCase()} in news`);
+      }
+    });
+
+    // Fix 3: Brand confusion check
+    const BRAND_CONFUSIONS = {
+      'SAGA':['saga phone','solana saga','saga mobile'],
+      'ONE': ['harmony one','one ring'],
+      'SC':  ['siacoin','sia coin'],
+    };
+    if(BRAND_CONFUSIONS[sym]){
+      BRAND_CONFUSIONS[sym].forEach(confuse=>{
+        if(text.includes(confuse)){ newsScore-=10; catalysts.push(`⚠️ Brand confusion: ${confuse}`); }
+      });
+    }
+
     return { newsScore: Math.min(60, Math.max(-40, newsScore)), catalysts, articleCount };
   }catch(e){ return { newsScore:0, catalysts:[], articleCount:0 }; }
 }
@@ -695,8 +762,13 @@ async function enhancedScore(sym, priceINR, change1d, high24h, low24h, volume){
   else if(change1d > 25) pumpPenalty = -35;
   else if(change1d > 20) pumpPenalty = -20;
 
+  // Fix 2: Fear & Greed penalty
+  const fg = await getFearGreed().catch(()=>({value:50}));
+  const fearPenalty = fg.value<=25?-20:fg.value<=35?-10:0;
+  if(fearPenalty<0) catalysts.push(`😨 Fear & Greed: ${fg.value} (${fg.label}) — market is fearful`);
+
   const total = techScore + rsiScore + macdScore + vol.spikeScore +
-                mom.momentumScore + gain.gainerScore + news.newsScore + pumpPenalty;
+                mom.momentumScore + gain.gainerScore + news.newsScore + pumpPenalty + fearPenalty;
 
   // ── Reasons ──────────────────────────────────────────────────────────────
   const reasons = [];
